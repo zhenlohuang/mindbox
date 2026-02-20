@@ -1,0 +1,30 @@
+services:
+  mindbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mindbox:latest
+    container_name: mindbox
+    ports:
+      - "8080:8080"
+      - "6006:6006"
+    env_file:
+      - .env
+    environment:
+      MINDBOX_KERNEL: ${MINDBOX_KERNEL:-claude-code}
+      MINDBOX_DATA_ROOT: /mindbox
+      MINDBOX_PORT: "8080"
+    volumes:
+      - ./mindbox-skills:/mindbox/skills
+      - ./data/mindbox/datasets:/mindbox/datasets
+      - ./data/mindbox/projects:/mindbox/projects
+      - ./data/mindbox/models:/mindbox/models
+      - ./data/.claude:/root/.claude
+      - ./data/.cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,14 @@
+[package]
+name = "mindbox-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+mindbox-common = { path = "../mindbox-common" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,11 @@
+.git
+.gitignore
+.claude
+target
+data
+docs
+README.md
+LICENSE
+AGENTS.md
+*.log
+.DS_Store
