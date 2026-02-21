@@ -4,7 +4,6 @@ pub mod claude_code;
 pub mod codex;
 pub mod mock;
 pub mod prompt;
-pub mod skill_matcher;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -29,7 +28,6 @@ pub struct TaskContext {
     pub dataset: DatasetMetadata,
     pub task_dir: PathBuf,
     pub skills_dir: PathBuf,
-    pub skill_path: Option<PathBuf>,
 }
 
 #[async_trait]

@@ -9,7 +9,7 @@ use mindbox_common::{
     ArtifactItem, CreateTaskRequest, LogLevel, Metric, MindboxError, Project, Result, Task,
     TaskEvent, TaskResults, TaskStatus,
 };
-use mindbox_kernel::{DatasetMetadata, TaskContext, callback::KernelCallback, skill_matcher};
+use mindbox_kernel::{DatasetMetadata, TaskContext, callback::KernelCallback};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use tracing::{error, warn};
 
@@ -43,9 +43,6 @@ impl TaskService {
         tokio::fs::create_dir_all(task_dir.join("artifacts")).await?;
         tokio::fs::create_dir_all(task_dir.join("workspace")).await?;
 
-        let matched_skill_path =
-            skill_matcher::match_skill(&req.task_description, &self.state.config.skills_dir());
-
         let now = Utc::now();
         let task = Task {
             id: task_id.clone(),
@@ -56,9 +53,7 @@ impl TaskService {
             created_at: now,
             started_at: Some(now),
             completed_at: None,
-            matched_skill: matched_skill_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
+            matched_skill: None,
             framework: None,
             base_model: None,
             hardware: None,
@@ -72,14 +67,7 @@ impl TaskService {
         let task_for_run = task.clone();
         let task_dir_for_run = task_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_kernel(
-                state,
-                project,
-                task_for_run,
-                task_dir_for_run,
-                matched_skill_path,
-            )
-            .await
+            if let Err(e) = run_kernel(state, project, task_for_run, task_dir_for_run).await
             {
                 error!("failed to run kernel task: {e}");
             }
@@ -374,7 +362,6 @@ async fn run_kernel(
     project: Project,
     task: Task,
     task_dir: PathBuf,
-    skill_path: Option<PathBuf>,
 ) -> Result<()> {
     let callback = Arc::new(BroadcastCallback::new(
         project.id.clone(),
@@ -394,7 +381,6 @@ async fn run_kernel(
         dataset,
         task_dir: task_dir.clone(),
         skills_dir: state.config.skills_dir(),
-        skill_path,
     };
 
     let result = state.kernel.execute(context, callback.clone()).await;

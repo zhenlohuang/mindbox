@@ -1,19 +1,9 @@
-use std::fs;
-
 use crate::TaskContext;
 
-pub fn build_system_prompt(ctx: &TaskContext) -> String {
-    let mut prompt = String::from(
+pub fn build_system_prompt(_ctx: &TaskContext) -> String {
+    let prompt = String::from(
         "You are Mindbox Kernel. Execute fine-tuning tasks safely, emit structured progress, and write artifacts.",
     );
-
-    if let Some(skill_path) = &ctx.skill_path
-        && let Ok(content) = fs::read_to_string(skill_path)
-    {
-        prompt.push_str("\n\nUse the following SKILL.md guidance:\n");
-        prompt.push_str(&content);
-    }
-
     prompt
 }
 
