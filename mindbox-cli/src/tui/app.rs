@@ -123,7 +123,7 @@ impl App {
             }
             KeyCode::Char('k') => self.scroll_up(3),
             KeyCode::Char('j') => self.scroll_down(3),
-            KeyCode::Char('u') => {
+            KeyCode::Char('o') => {
                 self.expand_tool_results = !self.expand_tool_results;
                 self.refresh_kernel_scroll_after_view_change();
             }

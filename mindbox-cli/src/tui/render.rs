@@ -193,7 +193,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &A
                 "collapsed".to_string()
             };
             format!(
-                "{} | Switch Panel(tab): Kernel Output | Thinking(t): {} | Tool Use(u): {}",
+                "{} | Switch Panel(tab): Kernel Output | Thinking(t): {} | Tool Use(o): {}",
                 app.connection_status, thinking_state, tool_use_state
             )
         }
