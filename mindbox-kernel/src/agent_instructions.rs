@@ -9,8 +9,8 @@ pub fn build_agent_md() -> String {
 ## Script Execution Rules
 
 When running training, evaluation, or data preparation scripts:
-1. ALWAYS redirect stdout and stderr to a log file under workspace/logs/. Example:
-   mkdir -p workspace/logs && python workspace/scripts/train.py > workspace/logs/train.log 2>&1
+1. ALWAYS redirect stdout and stderr to a log file under logs/. Example:
+   mkdir -p logs && python workspace/scripts/train.py > logs/train.log 2>&1
 2. NEVER run scripts with output directly to terminal - this wastes your context window.
 3. After the script exits, check the exit code ($?).
 4. If the script FAILED (non-zero exit), read the last 50 lines of the log file to diagnose the error.
@@ -18,7 +18,7 @@ When running training, evaluation, or data preparation scripts:
 
 ## Directory Layout
 - workspace/scripts/ - generated training scripts and configs
-- workspace/logs/ - script execution logs (redirected stdout/stderr)
+- logs/ - script execution logs (redirected stdout/stderr)
 - artifacts/ - final outputs (weights, reports, exported models)
 "#
     .to_string()

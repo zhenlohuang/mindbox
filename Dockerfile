@@ -18,6 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libxcb1 \
     python3 \
     python3-pip \
     supervisor \
@@ -28,13 +33,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --no-cache-dir --break-system-packages tensorboard
 RUN npm install -g @anthropic-ai/claude-code
 
-WORKDIR /workspace
+WORKDIR /mindbox
 
 COPY --from=builder /app/target/release/mindbox-server /mindbox/bin/mindbox-server
 COPY --from=builder /app/target/release/mindbox-cli /mindbox/bin/mindbox-cli
 COPY docker/docker-entrypoint.sh /mindbox/bin/docker-entrypoint.sh
 COPY docker/supervisord.conf /etc/supervisor/conf.d/mindbox.conf
-RUN chmod +x /mindbox/bin/docker-entrypoint.sh
+RUN chmod +x /mindbox/bin/docker-entrypoint.sh \
+    && groupadd --system mindbox \
+    && useradd --system --gid mindbox --create-home --home-dir /home/mindbox --shell /usr/sbin/nologin mindbox \
+    && mkdir -p /home/mindbox/.config /home/mindbox/.local/bin \
+    && chown -R mindbox:mindbox /mindbox /home/mindbox
 
 ENV MINDBOX_KERNEL=claude-code
 ENV MINDBOX_DATA_ROOT=/mindbox
@@ -42,5 +51,8 @@ ENV MINDBOX_PORT=8080
 
 EXPOSE 8080
 EXPOSE 6006
+
+USER mindbox
+ENV PATH="/home/mindbox/.local/bin:${PATH}"
 
 ENTRYPOINT ["/mindbox/bin/docker-entrypoint.sh"]

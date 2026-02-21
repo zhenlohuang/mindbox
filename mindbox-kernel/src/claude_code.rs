@@ -53,13 +53,28 @@ impl Kernel for ClaudeCodeKernel {
 
         let mut cmd = Command::new("claude");
         cmd.arg("--print")
+            .arg("--verbose")
             .arg("--output-format")
             .arg("stream-json")
             .arg("--system-prompt")
-            .arg(system_prompt)
-            .arg("--dangerously-skip-permissions")
-            .arg(user_prompt)
+            .arg(system_prompt);
+
+        // Claude Code rejects bypass-permission mode for root/sudo users.
+        if !running_as_root() {
+            cmd.arg("--dangerously-skip-permissions");
+        } else {
+            callback
+                .log(
+                    LogLevel::Warn,
+                    "running as root: skip --dangerously-skip-permissions for claude command"
+                        .to_string(),
+                )
+                .await;
+        }
+
+        cmd.arg(user_prompt)
             .current_dir(&ctx.task_dir)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -87,8 +102,10 @@ impl Kernel for ClaudeCodeKernel {
             running.insert(task_id.clone(), child);
         }
 
-        let events_path = task_dir.join("events.jsonl");
-        let logs_path = task_dir.join("stdout.log");
+        let logs_dir = task_dir.join("logs");
+        tokio::fs::create_dir_all(&logs_dir).await?;
+        let events_path = logs_dir.join("events.jsonl");
+        let logs_path = logs_dir.join("kernel.log");
         let events_file = Arc::new(AsyncMutex::new(
             OpenOptions::new()
                 .create(true)
@@ -249,4 +266,19 @@ async fn process_stream_line(
     }
 
     Ok(())
+}
+
+fn running_as_root() -> bool {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status")
+        && let Some(uid_line) = status.lines().find(|line| line.starts_with("Uid:"))
+    {
+        // "Uid:\t<real>\t<effective>\t<saved>\t<filesystem>"
+        if let Some(effective_uid) = uid_line.split_whitespace().nth(2) {
+            return effective_uid == "0";
+        }
+    }
+
+    std::env::var("EUID").ok().as_deref() == Some("0")
+        || std::env::var("UID").ok().as_deref() == Some("0")
+        || std::env::var("USER").ok().as_deref() == Some("root")
 }

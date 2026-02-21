@@ -14,13 +14,14 @@ services:
       MINDBOX_KERNEL: ${MINDBOX_KERNEL:-claude-code}
       MINDBOX_DATA_ROOT: /mindbox
       MINDBOX_PORT: "8080"
+    gpus: all
     volumes:
       - ./mindbox-skills:/mindbox/skills
       - ./data/mindbox/datasets:/mindbox/datasets
       - ./data/mindbox/projects:/mindbox/projects
       - ./data/mindbox/models:/mindbox/models
-      - ./data/.claude:/root/.claude
-      - ./data/.cache:/root/.cache
+      - ./data/.claude:/home/mindbox/.claude
+      - ./data/.cache:/home/mindbox/.cache
     deploy:
       resources:
         reservations:

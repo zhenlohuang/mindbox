@@ -42,6 +42,7 @@ impl TaskService {
         let task_dir = self.task_dir(project_id, &task_id);
         tokio::fs::create_dir_all(task_dir.join("artifacts")).await?;
         tokio::fs::create_dir_all(task_dir.join("workspace")).await?;
+        tokio::fs::create_dir_all(task_dir.join("logs")).await?;
 
         let now = Utc::now();
         let task = Task {
@@ -67,8 +68,7 @@ impl TaskService {
         let task_for_run = task.clone();
         let task_dir_for_run = task_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_kernel(state, project, task_for_run, task_dir_for_run).await
-            {
+            if let Err(e) = run_kernel(state, project, task_for_run, task_dir_for_run).await {
                 error!("failed to run kernel task: {e}");
             }
         });
@@ -153,7 +153,7 @@ impl TaskService {
     pub async fn list_events(&self, project_id: &str, task_id: &str) -> Result<Vec<TaskEvent>> {
         self.get_task(project_id, task_id).await?;
 
-        let events_path = self.task_dir(project_id, task_id).join("events.jsonl");
+        let events_path = self.task_dir(project_id, task_id).join("logs/events.jsonl");
         if !events_path.exists() {
             return Ok(Vec::new());
         }
@@ -172,7 +172,7 @@ impl TaskService {
     pub async fn read_logs(&self, project_id: &str, task_id: &str) -> Result<String> {
         self.get_task(project_id, task_id).await?;
 
-        let logs_path = self.task_dir(project_id, task_id).join("stdout.log");
+        let logs_path = self.task_dir(project_id, task_id).join("logs/kernel.log");
         if !logs_path.exists() {
             return Ok(String::new());
         }
@@ -283,8 +283,8 @@ impl BroadcastCallback {
         Self {
             project_id,
             task_id,
-            events_path: task_dir.join("events.jsonl"),
-            logs_path: task_dir.join("stdout.log"),
+            events_path: task_dir.join("logs/events.jsonl"),
+            logs_path: task_dir.join("logs/kernel.log"),
             tx,
         }
     }

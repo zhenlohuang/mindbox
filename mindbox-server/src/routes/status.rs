@@ -1,6 +1,7 @@
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::Utc;
 use mindbox_common::StatusResponse;
+use serde::Serialize;
 
 use crate::{
     error::ApiResult,
@@ -9,7 +10,18 @@ use crate::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/health", get(status))
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/v1/status", get(status))
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
 }
 
 async fn status(State(state): State<AppState>) -> ApiResult<Json<StatusResponse>> {
