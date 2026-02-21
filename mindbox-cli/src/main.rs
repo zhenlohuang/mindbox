@@ -1,5 +1,7 @@
 mod client;
 mod commands;
+mod tui;
+#[allow(dead_code)]
 mod ui;
 
 use clap::{Parser, Subcommand};

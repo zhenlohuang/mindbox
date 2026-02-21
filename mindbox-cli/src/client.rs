@@ -64,4 +64,15 @@ impl MindboxClient {
             .await
             .context("parse list_tasks response")
     }
+
+    pub async fn get_task(&self, task_id: &str) -> Result<GetTaskResponse> {
+        self.http
+            .get(format!("{}/api/v1/tasks/{}", self.base_url, task_id))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<GetTaskResponse>()
+            .await
+            .context("parse get_task response")
+    }
 }

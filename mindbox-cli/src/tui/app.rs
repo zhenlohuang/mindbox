@@ -1,0 +1,874 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use mindbox_common::{Task, TaskEvent, TaskStatus};
+use serde_json::Value;
+
+use crate::tui::event::AppEvent;
+
+#[derive(Debug, Clone)]
+pub enum LogEntry {
+    AssistantText(String),
+    Thinking(String),
+    ToolUse { name: String, summary: String },
+    ToolResult(String),
+    SystemMessage(String),
+    ResultMessage(String),
+    Raw(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum TrainingEntry {
+    Status {
+        status: String,
+        message: String,
+    },
+    Metric {
+        name: String,
+        value: String,
+        step: Option<u64>,
+    },
+    Error(String),
+    Log(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusedPanel {
+    Kernel,
+    Training,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollState {
+    pub offset: usize,
+    pub auto_scroll: bool,
+}
+
+impl Default for ScrollState {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            auto_scroll: true,
+        }
+    }
+}
+
+pub struct App {
+    pub task_id: String,
+    pub task: Option<Task>,
+    pub kernel_logs: Vec<LogEntry>,
+    pub training_logs: Vec<TrainingEntry>,
+    pub focused: FocusedPanel,
+    pub kernel_scroll: ScrollState,
+    pub training_scroll: ScrollState,
+    pub connection_status: String,
+    pub should_quit: bool,
+    pub stream_ended: bool,
+    pub expand_tool_results: bool,
+    pub expand_thinking: bool,
+    pub kernel_max_offset: usize,
+    pub training_max_offset: usize,
+}
+
+impl App {
+    pub fn new(task_id: String) -> Self {
+        Self {
+            task_id,
+            task: None,
+            kernel_logs: Vec::new(),
+            training_logs: Vec::new(),
+            focused: FocusedPanel::Kernel,
+            kernel_scroll: ScrollState::default(),
+            training_scroll: ScrollState::default(),
+            connection_status: "Connecting".to_string(),
+            should_quit: false,
+            stream_ended: false,
+            expand_tool_results: false,
+            expand_thinking: false,
+            kernel_max_offset: 0,
+            training_max_offset: 0,
+        }
+    }
+
+    pub fn handle(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(key) => self.handle_key(key),
+            AppEvent::Resize(width, height) => {
+                let _ = (width, height);
+            }
+            AppEvent::ScrollUp => self.scroll_up(3),
+            AppEvent::ScrollDown => self.scroll_down(3),
+            AppEvent::TaskEvent(event) => self.handle_task_event(event),
+            AppEvent::RawLog(line) => self.handle_raw_log(line),
+            AppEvent::StreamConnected => {
+                self.connection_status = "Connected".to_string();
+            }
+            AppEvent::StreamEnded => {
+                self.stream_ended = true;
+                self.connection_status = "Stream ended".to_string();
+            }
+            AppEvent::TaskInfo(task) => self.task = Some(*task),
+            AppEvent::TrainLog(line) => self.handle_train_log_line(line),
+            AppEvent::Tick => {}
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('k') => self.scroll_up(3),
+            KeyCode::Char('j') => self.scroll_down(3),
+            KeyCode::Char('u') => {
+                self.expand_tool_results = !self.expand_tool_results;
+                self.refresh_kernel_scroll_after_view_change();
+            }
+            KeyCode::Char('t') => {
+                self.expand_thinking = !self.expand_thinking;
+                self.refresh_kernel_scroll_after_view_change();
+            }
+            KeyCode::Tab => {
+                self.focused = match self.focused {
+                    FocusedPanel::Kernel => FocusedPanel::Training,
+                    FocusedPanel::Training => FocusedPanel::Kernel,
+                };
+            }
+            KeyCode::Up => self.scroll_up(3),
+            KeyCode::Down => self.scroll_down(3),
+            KeyCode::PageUp => self.scroll_up(12),
+            KeyCode::PageDown => self.scroll_down(12),
+            KeyCode::Home => self.scroll_to_top(),
+            KeyCode::End => {
+                let scroll = self.focused_scroll_mut();
+                scroll.auto_scroll = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn focused_scroll_mut(&mut self) -> &mut ScrollState {
+        match self.focused {
+            FocusedPanel::Kernel => &mut self.kernel_scroll,
+            FocusedPanel::Training => &mut self.training_scroll,
+        }
+    }
+
+    fn scroll_up(&mut self, amount: usize) {
+        let fallback_bottom = self.focused_max_offset();
+        let scroll = self.focused_scroll_mut();
+        if scroll.auto_scroll {
+            scroll.auto_scroll = false;
+            scroll.offset = fallback_bottom;
+        }
+        scroll.offset = scroll.offset.min(fallback_bottom).saturating_sub(amount);
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        let max_offset = self.focused_max_offset();
+        let scroll = self.focused_scroll_mut();
+        if scroll.auto_scroll {
+            return;
+        }
+        scroll.offset = scroll.offset.saturating_add(amount).min(max_offset);
+    }
+
+    fn scroll_to_top(&mut self) {
+        let scroll = self.focused_scroll_mut();
+        scroll.auto_scroll = false;
+        scroll.offset = 0;
+    }
+
+    fn focused_max_offset(&self) -> usize {
+        match self.focused {
+            FocusedPanel::Kernel => self.kernel_max_offset,
+            FocusedPanel::Training => self.training_max_offset,
+        }
+    }
+
+    pub fn set_panel_max_offset(&mut self, panel: FocusedPanel, max_offset: usize) {
+        match panel {
+            FocusedPanel::Kernel => self.kernel_max_offset = max_offset,
+            FocusedPanel::Training => self.training_max_offset = max_offset,
+        }
+    }
+
+    fn refresh_kernel_scroll_after_view_change(&mut self) {
+        if self.kernel_scroll.auto_scroll {
+            self.kernel_scroll.offset = self.kernel_total_lines();
+        }
+    }
+
+    fn handle_task_event(&mut self, event: TaskEvent) {
+        match event {
+            TaskEvent::Log { message, .. } => self.route_log_message(message),
+            TaskEvent::StatusUpdate {
+                status, message, ..
+            } => {
+                self.push_training(TrainingEntry::Status {
+                    status: format_status(status).to_string(),
+                    message,
+                });
+                if matches!(
+                    status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    self.stream_ended = true;
+                    self.connection_status = "Task ended".to_string();
+                }
+            }
+            TaskEvent::Metric { metric, .. } => {
+                self.push_training(TrainingEntry::Metric {
+                    name: metric.name,
+                    value: metric.value.to_string(),
+                    step: metric.step,
+                });
+            }
+            TaskEvent::Error { message, .. } => self.push_training(TrainingEntry::Error(message)),
+        }
+    }
+
+    fn handle_raw_log(&mut self, line: String) {
+        self.route_log_message(line);
+    }
+
+    fn route_log_message(&mut self, message: String) {
+        let parsed = parse_claude_log_entries(&message);
+        if !parsed.is_empty() {
+            for entry in parsed {
+                self.push_kernel(entry);
+            }
+            return;
+        }
+
+        if let Some(entry) = parse_training_entry(&message) {
+            self.push_training(entry);
+            return;
+        }
+
+        if let Some(entry) = parse_jsonl_fallback_entry(&message) {
+            self.push_kernel(entry);
+            return;
+        }
+
+        let line = sanitize_line_for_display(&message);
+        if !line.is_empty() {
+            self.push_kernel(LogEntry::Raw(line));
+        }
+    }
+
+    fn handle_train_log_line(&mut self, line: String) {
+        let line = sanitize_line_for_display(&line);
+        if line.is_empty() {
+            return;
+        }
+        self.push_training(TrainingEntry::Log(line));
+    }
+
+    fn push_kernel(&mut self, entry: LogEntry) {
+        self.kernel_logs.push(entry);
+        if self.kernel_scroll.auto_scroll {
+            self.kernel_scroll.offset = self.kernel_total_lines();
+        }
+    }
+
+    fn push_training(&mut self, entry: TrainingEntry) {
+        self.training_logs.push(entry);
+        if self.training_scroll.auto_scroll {
+            self.training_scroll.offset = self.training_total_lines();
+        }
+    }
+
+    pub fn kernel_total_lines(&self) -> usize {
+        let mut total = 0;
+        for (i, entry) in self.kernel_logs.iter().enumerate() {
+            // Separator blank line between different entry types
+            if i > 0 {
+                let prev = &self.kernel_logs[i - 1];
+                let tool_pair_contiguous = matches!(prev, LogEntry::ToolUse { .. })
+                    && matches!(entry, LogEntry::ToolResult(_));
+                if !tool_pair_contiguous {
+                    total += 1;
+                }
+            }
+            match entry {
+                LogEntry::AssistantText(text) => total += text.lines().count().max(1),
+                LogEntry::Thinking(text) => {
+                    // "Thinking:" header line is always rendered.
+                    total += 1;
+                    if self.expand_thinking {
+                        total += text.lines().count().max(1);
+                    } else {
+                        // Collapsed hint line: "(N lines) [collapsed]".
+                        total += 1;
+                    }
+                }
+                LogEntry::ToolUse { summary, .. } => {
+                    // header + summary (if non-empty)
+                    total += 1;
+                    if !summary.is_empty() {
+                        total += 1;
+                    }
+                }
+                LogEntry::ToolResult(text) => {
+                    total += 1;
+                    if self.expand_tool_results {
+                        total += text.lines().count().max(1);
+                    }
+                }
+                LogEntry::SystemMessage(_) => total += 1,
+                LogEntry::ResultMessage(text) => total += 1 + text.lines().count().max(1),
+                LogEntry::Raw(text) => total += text.lines().count().max(1),
+            }
+        }
+        total
+    }
+
+    pub fn training_total_lines(&self) -> usize {
+        self.training_logs
+            .iter()
+            .map(|entry| match entry {
+                TrainingEntry::Status { message, .. }
+                | TrainingEntry::Error(message)
+                | TrainingEntry::Log(message) => message.lines().count().max(1),
+                TrainingEntry::Metric { .. } => 1,
+            })
+            .sum()
+    }
+}
+
+fn extract_tool_summary(name: &str, input: Option<&Value>) -> String {
+    let input = match input {
+        Some(v) => v,
+        None => return String::new(),
+    };
+
+    match name {
+        "Read" | "Write" => input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "Edit" => input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "Bash" => {
+            let cmd = input.get("command").and_then(Value::as_str).unwrap_or("");
+            if cmd.len() > 80 {
+                format!("{}…", &cmd[..80])
+            } else {
+                cmd.to_string()
+            }
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(Value::as_str).unwrap_or("");
+            let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+            format!("`{pattern}` in {path}")
+        }
+        "Glob" => input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "WebSearch" => input
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "WebFetch" => input
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => {
+            // First string field or empty
+            if let Value::Object(map) = input {
+                for v in map.values() {
+                    if let Value::String(s) = v {
+                        if !s.is_empty() {
+                            let s = if s.len() > 80 {
+                                format!("{}…", &s[..80])
+                            } else {
+                                s.clone()
+                            };
+                            return s;
+                        }
+                    }
+                }
+            }
+            String::new()
+        }
+    }
+}
+
+fn parse_claude_log_entries(line: &str) -> Vec<LogEntry> {
+    let value = match serde_json::from_str::<Value>(line) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match event_type.as_str() {
+        "assistant" => parse_assistant_message_entries(&value),
+        "user" => parse_user_message_entries(&value),
+        "tool_use" => {
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("tool_name").and_then(Value::as_str))
+                .or_else(|| value.pointer("/tool/name").and_then(Value::as_str))
+                .unwrap_or("unknown")
+                .to_string();
+            let input_value = value
+                .get("input")
+                .or_else(|| value.get("tool_input"))
+                .or_else(|| value.get("arguments"));
+            let summary = extract_tool_summary(&name, input_value);
+            vec![LogEntry::ToolUse { name, summary }]
+        }
+        "tool_result" => {
+            let content = value
+                .get("content")
+                .or_else(|| value.get("result"))
+                .or_else(|| value.get("message"))
+                .map(format_value)
+                .or_else(|| extract_textish(Some(&value)));
+            content.map(LogEntry::ToolResult).into_iter().collect()
+        }
+        "system" => {
+            let message = extract_textish(
+                value
+                    .get("message")
+                    .or_else(|| value.get("text"))
+                    .or_else(|| value.get("content")),
+            );
+            message.map(LogEntry::SystemMessage).into_iter().collect()
+        }
+        "result" => {
+            let message = extract_textish(
+                value
+                    .get("text")
+                    .or_else(|| value.get("result"))
+                    .or_else(|| value.get("message"))
+                    .or_else(|| value.get("content")),
+            )
+            .unwrap_or_else(|| line.to_string());
+            vec![LogEntry::ResultMessage(message)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
+    let mut out = Vec::new();
+
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        for block in content {
+            let block_type = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
+            match block_type.as_str() {
+                "text" => {
+                    if let Some(text) =
+                        extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
+                    {
+                        out.push(LogEntry::AssistantText(text));
+                    }
+                }
+                "thinking" => {
+                    if let Some(text) =
+                        extract_thinking_text(block).and_then(|t| normalize_multiline_text(&t))
+                    {
+                        out.push(LogEntry::Thinking(text));
+                    }
+                }
+                "tool_use" => {
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let summary = extract_tool_summary(&name, block.get("input"));
+                    out.push(LogEntry::ToolUse { name, summary });
+                }
+                _ => {
+                    if let Some(text) =
+                        extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
+                    {
+                        out.push(LogEntry::AssistantText(text));
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty()
+        && let Some(text) = extract_textish(
+            value
+                .get("text")
+                .or_else(|| value.pointer("/delta/text"))
+                .or_else(|| value.pointer("/message/content"))
+                .or_else(|| value.get("content"))
+                .or_else(|| value.get("message")),
+        )
+        .and_then(|t| normalize_multiline_text(&t))
+    {
+        out.push(LogEntry::AssistantText(text));
+    }
+
+    out
+}
+
+fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
+    let mut out = Vec::new();
+    let mut has_tool_result = false;
+
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        for block in content {
+            let block_type = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
+            match block_type.as_str() {
+                "tool_result" => {
+                    if let Some(text) = extract_textish(block.get("content"))
+                        .or_else(|| extract_textish(Some(block)))
+                        .and_then(|t| normalize_multiline_text(&t))
+                    {
+                        has_tool_result = true;
+                        out.push(LogEntry::ToolResult(text));
+                    }
+                }
+                "text" => {
+                    if let Some(text) =
+                        extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
+                    {
+                        out.push(LogEntry::SystemMessage(format!("[user] {text}")));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !has_tool_result
+        && let Some(text) = extract_tool_use_result_text(value).and_then(|t| {
+            // Keep stdout/stderr readable, but drop accidental leading/trailing empty lines.
+            normalize_multiline_text(&t)
+        })
+    {
+        out.push(LogEntry::ToolResult(text));
+    }
+
+    out
+}
+
+fn extract_tool_use_result_text(value: &Value) -> Option<String> {
+    let stdout = value
+        .pointer("/tool_use_result/stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr = value
+        .pointer("/tool_use_result/stderr")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let mut merged = String::new();
+    if !stdout.trim().is_empty() {
+        merged.push_str(stdout.trim());
+    }
+    if !stderr.trim().is_empty() {
+        if !merged.is_empty() {
+            merged.push('\n');
+        }
+        merged.push_str(stderr.trim());
+    }
+
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn extract_thinking_text(value: &Value) -> Option<String> {
+    value
+        .get("thinking")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| extract_textish(Some(value)))
+}
+
+fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let object = value.as_object()?;
+
+    let event_type = object.get("type").and_then(Value::as_str).unwrap_or("json");
+    let subtype = object
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let mut summary = if subtype.is_empty() {
+        format!("[json] type={event_type}")
+    } else {
+        format!("[json] type={event_type} subtype={subtype}")
+    };
+
+    let detail = extract_textish(
+        object
+            .get("message")
+            .or_else(|| object.get("result"))
+            .or_else(|| object.get("error"))
+            .or_else(|| object.get("status"))
+            .or_else(|| object.get("detail")),
+    )
+    .map(|text| truncate_text(&sanitize_line_for_display(&text), 180));
+
+    if let Some(text) = detail
+        && !text.is_empty()
+    {
+        summary.push_str(" | ");
+        summary.push_str(&text);
+    }
+
+    Some(LogEntry::SystemMessage(summary))
+}
+
+fn parse_training_entry(line: &str) -> Option<TrainingEntry> {
+    let trimmed = line.trim();
+    if let Some(content) = trimmed.strip_prefix("[error]") {
+        return Some(TrainingEntry::Error(content.trim().to_string()));
+    }
+
+    if let Some(content) = trimmed
+        .strip_prefix("[status:")
+        .and_then(|s| s.split_once(']'))
+    {
+        let status = content.0.trim().to_string();
+        let message = content.1.trim().to_string();
+        return Some(TrainingEntry::Status { status, message });
+    }
+
+    if let Some(metric_text) = trimmed.strip_prefix("[metric]") {
+        return parse_metric_line(metric_text.trim());
+    }
+
+    None
+}
+
+fn parse_metric_line(line: &str) -> Option<TrainingEntry> {
+    let (name, right) = line.split_once('=')?;
+    let (value, step) = match right.split_once(" step=") {
+        Some((value, step)) => (value.trim().to_string(), step.trim().parse::<u64>().ok()),
+        None => (right.trim().to_string(), None),
+    };
+    Some(TrainingEntry::Metric {
+        name: name.trim().to_string(),
+        value,
+        step,
+    })
+}
+
+fn format_status(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+fn sanitize_line_for_display(input: &str) -> String {
+    let no_carriage = input.rsplit('\r').next().unwrap_or(input);
+    let no_ansi = strip_ansi_escape(no_carriage);
+    no_ansi.trim().to_string()
+}
+
+fn normalize_multiline_text(input: &str) -> Option<String> {
+    let stripped = strip_ansi_escape(input).replace('\r', "");
+    if stripped.trim().is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<String> = stripped
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect();
+    while matches!(lines.first(), Some(line) if line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while matches!(lines.last(), Some(line) if line.trim().is_empty()) {
+        let _ = lines.pop();
+    }
+
+    let mut compact = Vec::with_capacity(lines.len());
+    let mut previous_blank = false;
+    for line in lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank && previous_blank {
+            continue;
+        }
+        previous_blank = is_blank;
+        compact.push(line);
+    }
+
+    if compact.is_empty() {
+        None
+    } else {
+        Some(compact.join("\n"))
+    }
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(max_chars + 1);
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn strip_ansi_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek().copied() == Some('[') {
+                let _ = chars.next();
+                for next in chars.by_ref() {
+                    let code = next as u32;
+                    if (0x40..=0x7E).contains(&code) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
+fn extract_textish(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(s) => {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|item| extract_textish(Some(item)))
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                return Some(text.to_string());
+            }
+            for key in [
+                "message", "content", "result", "output", "delta", "thinking",
+            ] {
+                if let Some(found) = extract_textish(map.get(key)) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null => None,
+    }
+}
+
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_assistant_tool_use_block_from_stream_json() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hello"}}]}}"#;
+        let entries = parse_claude_log_entries(line);
+
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            LogEntry::ToolUse { name, summary } => {
+                assert_eq!(name, "Bash");
+                assert_eq!(summary, "echo hello");
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        };
+    }
+
+    #[test]
+    fn parse_user_tool_result_block_from_stream_json() {
+        let line =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"done"}]}}"#;
+        let entries = parse_claude_log_entries(line);
+
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            LogEntry::ToolResult(content) => assert_eq!(content, "done"),
+            other => panic!("unexpected entry: {other:?}"),
+        };
+    }
+
+    #[test]
+    fn parse_assistant_thinking_block_from_stream_json() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"plan first"}]}}"#;
+        let entries = parse_claude_log_entries(line);
+
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            LogEntry::Thinking(content) => assert_eq!(content, "plan first"),
+            other => panic!("unexpected entry: {other:?}"),
+        };
+    }
+}

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::{client::MindboxClient, ui};
+use crate::{client::MindboxClient, tui};
 
 #[derive(Debug, Args)]
 pub struct TaskCommand {
@@ -30,14 +30,14 @@ pub async fn execute(cmd: TaskCommand, client: &MindboxClient) -> Result<()> {
     match cmd.command {
         TaskSubcommand::Create { dataset, desc } => {
             let response = client.create_task(dataset, desc).await?;
-            println!("{}", response.task.id);
+            tui::run(client, &response.task.id).await?;
         }
         TaskSubcommand::Stop { task_id } => {
             let response = client.cancel_task(&task_id).await?;
             println!("task {} => {:?}", response.task_id, response.status);
         }
         TaskSubcommand::Attach { task_id } => {
-            ui::attach_logs(client, &task_id).await?;
+            tui::run(client, &task_id).await?;
         }
         TaskSubcommand::List => {
             let response = client.list_tasks().await?;

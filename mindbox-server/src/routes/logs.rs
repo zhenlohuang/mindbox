@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
     routing::get,
 };
-use mindbox_common::{format_stream_event, format_task_event};
+use mindbox_common::format_task_event;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -36,7 +36,7 @@ async fn get_task_logs(
         let task_filter = task_id.clone();
 
         let body_stream = stream! {
-            for line in existing.lines().map(format_stream_event) {
+            for line in existing.lines() {
                 yield Ok::<Event, Infallible>(Event::default().data(line));
             }
 
@@ -46,7 +46,10 @@ async fn get_task_logs(
                         if evt.task_id != task_filter {
                             continue;
                         }
-                        let msg = format_task_event(&evt.event);
+                        let msg = match &evt.event {
+                            mindbox_common::TaskEvent::Log { message, .. } => message.clone(),
+                            other => format_task_event(other),
+                        };
                         yield Ok::<Event, Infallible>(Event::default().data(msg));
                     }
                     Err(RecvError::Lagged(_)) => continue,
@@ -63,12 +66,6 @@ async fn get_task_logs(
         return Ok(sse.into_response());
     }
 
-    let text = service
-        .read_logs(&task_id)
-        .await?
-        .lines()
-        .map(format_stream_event)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = service.read_logs(&task_id).await?;
     Ok(text.into_response())
 }
