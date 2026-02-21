@@ -269,7 +269,6 @@ struct BroadcastCallback {
     project_id: String,
     task_id: String,
     events_path: PathBuf,
-    logs_path: PathBuf,
     tx: tokio::sync::broadcast::Sender<BroadcastEvent>,
 }
 
@@ -284,7 +283,6 @@ impl BroadcastCallback {
             project_id,
             task_id,
             events_path: task_dir.join("logs/events.jsonl"),
-            logs_path: task_dir.join("logs/kernel.log"),
             tx,
         }
     }
@@ -292,24 +290,6 @@ impl BroadcastCallback {
     async fn emit_event(&self, event: TaskEvent) {
         if let Ok(line) = serde_json::to_string(&event) {
             let _ = append_line(&self.events_path, &line).await;
-        }
-
-        match &event {
-            TaskEvent::Log { message, .. }
-            | TaskEvent::Error { message, .. }
-            | TaskEvent::StatusUpdate { message, .. } => {
-                let _ = append_line(&self.logs_path, message).await;
-            }
-            TaskEvent::Metric { metric, .. } => {
-                let _ = append_line(
-                    &self.logs_path,
-                    &format!(
-                        "metric {}={} step={:?}",
-                        metric.name, metric.value, metric.step
-                    ),
-                )
-                .await;
-            }
         }
 
         let _ = self.tx.send(BroadcastEvent {

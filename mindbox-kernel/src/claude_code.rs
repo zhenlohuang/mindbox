@@ -104,15 +104,7 @@ impl Kernel for ClaudeCodeKernel {
 
         let logs_dir = task_dir.join("logs");
         tokio::fs::create_dir_all(&logs_dir).await?;
-        let events_path = logs_dir.join("events.jsonl");
         let logs_path = logs_dir.join("kernel.log");
-        let events_file = Arc::new(AsyncMutex::new(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(events_path)
-                .await?,
-        ));
         let logs_file = Arc::new(AsyncMutex::new(
             OpenOptions::new()
                 .create(true)
@@ -122,17 +114,15 @@ impl Kernel for ClaudeCodeKernel {
         ));
 
         let cb1 = callback.clone();
-        let ev1 = events_file.clone();
         let lg1 = logs_file.clone();
         let stdout_handle = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let _ = process_stream_line(&line, cb1.clone(), ev1.clone(), lg1.clone()).await;
+                let _ = process_stream_line(&line, cb1.clone(), lg1.clone()).await;
             }
         });
 
         let cb2 = callback.clone();
-        let ev2 = events_file.clone();
         let lg2 = logs_file.clone();
         let stderr_handle = tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
@@ -140,7 +130,7 @@ impl Kernel for ClaudeCodeKernel {
                 let _ = cb2
                     .log(LogLevel::Error, format!("claude stderr: {line}"))
                     .await;
-                let _ = process_stream_line(&line, cb2.clone(), ev2.clone(), lg2.clone()).await;
+                let _ = process_stream_line(&line, cb2.clone(), lg2.clone()).await;
             }
         });
 
@@ -197,17 +187,10 @@ impl Kernel for ClaudeCodeKernel {
 async fn process_stream_line(
     line: &str,
     callback: Arc<dyn KernelCallback>,
-    events_file: Arc<AsyncMutex<tokio::fs::File>>,
     logs_file: Arc<AsyncMutex<tokio::fs::File>>,
 ) -> Result<()> {
     {
         let mut file = logs_file.lock().await;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
-    }
-
-    {
-        let mut file = events_file.lock().await;
         file.write_all(line.as_bytes()).await?;
         file.write_all(b"\n").await?;
     }

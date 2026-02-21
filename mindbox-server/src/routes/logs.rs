@@ -1,4 +1,4 @@
-use std::{convert::Infallible, time::Duration};
+use std::{cmp::Ordering, convert::Infallible, time::Duration};
 
 use async_stream::stream;
 use axum::{
@@ -6,6 +6,10 @@ use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
     routing::get,
+};
+use chrono::{DateTime, Utc};
+use mindbox_common::{
+    format_stream_event, format_task_event, parse_log_timestamp, task_event_timestamp,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
@@ -24,6 +28,13 @@ struct LogsQuery {
     follow: Option<bool>,
 }
 
+#[derive(Debug)]
+struct ReplayLine {
+    timestamp: Option<DateTime<Utc>>,
+    sequence: usize,
+    text: String,
+}
+
 async fn get_task_logs(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
@@ -32,13 +43,16 @@ async fn get_task_logs(
     let service = TaskService::new(state.clone());
 
     if query.follow.unwrap_or(false) {
-        let existing = service.read_logs(&project_id, &task_id).await?;
+        let existing_logs = service.read_logs(&project_id, &task_id).await?;
+        let existing_events = service.list_events(&project_id, &task_id).await?;
+        let existing = merge_replay_lines(existing_logs, existing_events);
+
         let mut rx = state.event_tx.subscribe();
         let project_filter = project_id.clone();
         let task_filter = task_id.clone();
 
         let body_stream = stream! {
-            for line in existing.lines() {
+            for line in existing {
                 yield Ok::<Event, Infallible>(Event::default().data(line));
             }
 
@@ -48,14 +62,7 @@ async fn get_task_logs(
                         if evt.project_id != project_filter || evt.task_id != task_filter {
                             continue;
                         }
-                        let msg = match evt.event {
-                            mindbox_common::TaskEvent::Log { message, .. }
-                            | mindbox_common::TaskEvent::Error { message, .. }
-                            | mindbox_common::TaskEvent::StatusUpdate { message, .. } => message,
-                            mindbox_common::TaskEvent::Metric { metric, .. } => {
-                                format!("metric {}={} step={:?}", metric.name, metric.value, metric.step)
-                            }
-                        };
+                        let msg = format_task_event(&evt.event);
                         yield Ok::<Event, Infallible>(Event::default().data(msg));
                     }
                     Err(RecvError::Lagged(_)) => continue,
@@ -72,6 +79,45 @@ async fn get_task_logs(
         return Ok(sse.into_response());
     }
 
-    let text = service.read_logs(&project_id, &task_id).await?;
+    let text = service
+        .read_logs(&project_id, &task_id)
+        .await?
+        .lines()
+        .map(format_stream_event)
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(text.into_response())
+}
+
+fn merge_replay_lines(raw_logs: String, events: Vec<mindbox_common::TaskEvent>) -> Vec<String> {
+    let mut sequence = 0usize;
+    let mut lines = Vec::new();
+
+    for line in raw_logs.lines() {
+        lines.push(ReplayLine {
+            timestamp: parse_log_timestamp(line),
+            sequence,
+            text: format_stream_event(line),
+        });
+        sequence += 1;
+    }
+
+    for event in events {
+        lines.push(ReplayLine {
+            timestamp: Some(task_event_timestamp(&event)),
+            sequence,
+            text: format_task_event(&event),
+        });
+        sequence += 1;
+    }
+
+    lines.sort_by(compare_replay_lines);
+    lines.into_iter().map(|line| line.text).collect()
+}
+
+fn compare_replay_lines(left: &ReplayLine, right: &ReplayLine) -> Ordering {
+    match (left.timestamp, right.timestamp) {
+        (Some(a), Some(b)) => a.cmp(&b).then(left.sequence.cmp(&right.sequence)),
+        _ => left.sequence.cmp(&right.sequence),
+    }
 }

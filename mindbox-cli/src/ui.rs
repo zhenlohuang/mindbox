@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures::StreamExt;
+use mindbox_common::format_log_line;
 use reqwest_eventsource::{Event, EventSource};
 
 use crate::client::MindboxClient;
@@ -14,7 +15,7 @@ pub async fn attach_logs(client: &MindboxClient, project_id: &str, task_id: &str
                 println!("connected to logs stream");
             }
             Ok(Event::Message(message)) => {
-                let data = message.data;
+                let data = format_log_line(&message.data);
                 println!("{data}");
                 if is_terminal_message(&data) {
                     es.close();
@@ -32,8 +33,12 @@ pub async fn attach_logs(client: &MindboxClient, project_id: &str, task_id: &str
 }
 
 fn is_terminal_message(message: &str) -> bool {
+    let text = message.trim().to_ascii_lowercase();
     matches!(
-        message.trim().to_ascii_lowercase().as_str(),
+        text.as_str(),
         "task completed" | "task failed" | "task cancelled" | "task canceled"
-    )
+    ) || text.starts_with("[status: completed]")
+        || text.starts_with("[status: failed]")
+        || text.starts_with("[status: cancelled]")
+        || text.starts_with("[status: canceled]")
 }
