@@ -14,10 +14,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::{error::ApiResult, services::task_service::TaskService, state::AppState};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/v1/projects/{project_id}/tasks/{task_id}/logs",
-        get(get_task_logs),
-    )
+    Router::new().route("/api/v1/tasks/{task_id}/logs", get(get_task_logs))
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,16 +24,15 @@ struct LogsQuery {
 
 async fn get_task_logs(
     State(state): State<AppState>,
-    Path((project_id, task_id)): Path<(String, String)>,
+    Path(task_id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> ApiResult<Response> {
     let service = TaskService::new(state.clone());
 
     if query.follow.unwrap_or(false) {
-        let existing = service.read_logs(&project_id, &task_id).await?;
+        let existing = service.read_logs(&task_id).await?;
 
         let mut rx = state.event_tx.subscribe();
-        let project_filter = project_id.clone();
         let task_filter = task_id.clone();
 
         let body_stream = stream! {
@@ -47,7 +43,7 @@ async fn get_task_logs(
             loop {
                 match rx.recv().await {
                     Ok(evt) => {
-                        if evt.project_id != project_filter || evt.task_id != task_filter {
+                        if evt.task_id != task_filter {
                             continue;
                         }
                         let msg = format_task_event(&evt.event);
@@ -68,7 +64,7 @@ async fn get_task_logs(
     }
 
     let text = service
-        .read_logs(&project_id, &task_id)
+        .read_logs(&task_id)
         .await?
         .lines()
         .map(format_stream_event)

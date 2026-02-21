@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MindboxError {
-    #[error("project not found: {0}")]
-    ProjectNotFound(String),
-
     #[error("task not found: {0}")]
     TaskNotFound(String),
 

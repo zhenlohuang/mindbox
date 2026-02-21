@@ -5,8 +5,8 @@ use reqwest_eventsource::{Event, EventSource};
 
 use crate::client::MindboxClient;
 
-pub async fn attach_logs(client: &MindboxClient, project_id: &str, task_id: &str) -> Result<()> {
-    let url = client.logs_follow_url(project_id, task_id);
+pub async fn attach_logs(client: &MindboxClient, task_id: &str) -> Result<()> {
+    let url = client.logs_follow_url(task_id);
     let mut es = EventSource::get(url);
 
     while let Some(event) = es.next().await {

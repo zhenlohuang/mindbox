@@ -8,7 +8,6 @@ use crate::services::task_lock::TaskLockService;
 
 #[derive(Debug, Clone)]
 pub struct BroadcastEvent {
-    pub project_id: String,
     pub task_id: String,
     pub event: TaskEvent,
 }

@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     client::MindboxClient,
-    commands::{project, sandbox, task},
+    commands::{sandbox, task},
 };
 
 #[derive(Parser, Debug)]
@@ -23,7 +23,6 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Sandbox(sandbox::SandboxCommand),
-    Project(project::ProjectCommand),
     Task(task::TaskCommand),
 }
 
@@ -34,7 +33,6 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Sandbox(cmd) => sandbox::execute(cmd).await,
-        Commands::Project(cmd) => project::execute(cmd, &client).await,
         Commands::Task(cmd) => task::execute(cmd, &client).await,
     }
 }

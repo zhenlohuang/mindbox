@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mindbox_common::{MindboxConfig, Project, Task};
+use mindbox_common::{MindboxConfig, Task};
 
 use crate::{claude_code::ClaudeCodeKernel, codex::CodexKernel, mock::MockKernel};
 
@@ -23,7 +23,6 @@ pub struct DatasetMetadata {
 
 #[derive(Debug, Clone)]
 pub struct TaskContext {
-    pub project: Project,
     pub task: Task,
     pub dataset: DatasetMetadata,
     pub task_dir: PathBuf,

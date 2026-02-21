@@ -22,19 +22,18 @@ Mindbox 是一个以 Docker 容器形式交付的**自动化模型微调平台**
 ## 2. 核心概念
 
 ```
-User ──▶ Project ──▶ Task ──▶ Artifact
-              │           │
-              │           ├── 超参配置
-              │           ├── 数据版本
-              │           ├── 训练日志
-              │           └── 评估报告
-              │
-              └── 共享：数据集、基线模型
+User ──▶ Task ──▶ Artifact
+         │          │
+         │          ├── 超参配置
+         │          ├── 数据版本
+         │          ├── 训练日志
+         │          └── 评估报告
+         │
+         └── 共享：数据集、基线模型
 ```
 
 | 概念 | 说明 | 标识 |
 |------|------|------|
-| **Project** | Task 的组织单元。系统内置 `default` 项目，用户可省略 project 参数 | `project_id`（用户命名，默认 `default`） |
 | **Task** | 一次完整的微调执行，包含从数据准备到模型导出的全过程 | `task_id`（自动生成，如 `task-20250214-001`） |
 | **Artifact** | Task 产出物的集合：权重、评估报告、导出模型 | 存储在 `tasks/{task_id}/artifacts/` 下 |
 
@@ -90,7 +89,7 @@ User ──▶ Project ──▶ Task ──▶ Artifact
 用户侧命令行工具，可运行在 Host 或远程机器上，通过 HTTP/SSE 与 Server 通信。
 
 - 容器（Sandbox）的启停管理
-- 项目与任务的 CRUD 管理
+- 任务的 CRUD 管理
 - 提交微调任务（自然语言 + 配置文件）
 - 实时流式查看训练日志（SSE）
 - 查询与下载 artifact
@@ -109,30 +108,23 @@ mindbox sandbox stop [--name <sandbox_name>]
 # 销毁 sandbox（停止并删除容器，挂载的数据不受影响）
 mindbox sandbox destroy [--name <sandbox_name>]
 
-# ── Project ──
-
-# 创建项目
-mindbox project create --name <project_name>
-
-# 编辑项目配置
-mindbox project edit --name <project_name>
-
 # ── Task ──
 
-# 启动任务
-#   --project:        指定所属 project（可选，默认 default）
-#   --create-project: 若 project 不存在则自动创建
-#   --dataset:        数据集路径
-#   --task:           任务描述（自然语言）
-mindbox task start [--project <project_name>] [--create-project] \
+# 创建并启动任务
+#   --dataset: 数据集路径
+#   --desc:    任务描述（自然语言）
+mindbox task create \
   --dataset /datasets/reviews.jsonl \
-  --task "基于 Qwen2.5-7B 做情感分类微调，使用 LoRA"
+  --desc "基于 Qwen2.5-7B 做情感分类微调，使用 LoRA"
 
 # 停止正在运行的任务
-mindbox task stop [--project <project_name>] <task_id>
+mindbox task stop <task_id>
 
 # 连接到正在运行的任务（实时查看日志与进度）
-mindbox task attach [--project <project_name>] <task_id>
+mindbox task attach <task_id>
+
+# 列出任务
+mindbox task list
 ```
 
 #### mindbox-server
@@ -142,12 +134,12 @@ mindbox task attach [--project <project_name>] <task_id>
 核心职责：
 
 - 接收并校验 CLI 请求（支持远程 HTTP/SSE 连接）
-- 管理 project / task 生命周期与状态机
+- 管理 task 生命周期与状态机
 - **全局任务锁**：同一时刻仅允许一个 task 执行，新请求排队或返回 busy
 - 根据环境变量 `MINDBOX_KERNEL` 初始化对应的 Kernel 实现
 - 调度 kernel 执行微调任务
 - 提供日志流（SSE）、状态查询、artifact 下载接口
-- 持久化项目元数据（project.yaml、task.yaml）
+- 持久化任务元数据（task.yaml）
 - 对已完成/失败的 task 目录做写保护，防止误删历史数据
 
 #### mindbox-kernel
@@ -272,50 +264,37 @@ SKILL.md 内容结构（CV 示例 — Object Detection）：
 ├── skills/                                # 微调技能库
 │   └── {skill_name}/SKILL.md
 │
-└── projects/
-    └── {project_id}/
-        ├── project.yaml                   # 项目配置与元信息
-        └── tasks/
-            └── {task_id}/
-                ├── AGENT.md             # Kernel 生成的 Agent 指令
-                ├── CLAUDE.md -> AGENT.md # 软链接，Claude Code 自动读取
-                ├── task.yaml              # 本次任务完整快照
-                ├── workspace/             # Agent 可写工作区（脚本执行的 cwd）
-                │   └── scripts/           # kernel 生成的脚本与配置
-                ├── logs/
-                │   ├── kernel.log         # Kernel (Claude Code) 输出日志
-                │   ├── train.log          # 训练脚本输出（Agent 重定向）
-                │   └── ...                # 其他脚本输出日志
-                ├── tb_logs/               # TensorBoard 日志
-                └── artifacts/             # 最终产物
-                    ├── weights/
-                    │   └── best.pt        # 最优权重
-                    ├── reports/
-                    │   └── eval.json      # 评估报告
-                    └── export/
-                        └── model.onnx     # 导出模型
+└── tasks/
+    └── {task_id}/
+        ├── AGENT.md             # Kernel 生成的 Agent 指令
+        ├── CLAUDE.md -> AGENT.md # 软链接，Claude Code 自动读取
+        ├── task.yaml              # 本次任务完整快照
+        ├── workspace/             # Agent 可写工作区（脚本执行的 cwd）
+        │   └── scripts/           # kernel 生成的脚本与配置
+        ├── logs/
+        │   ├── kernel.log         # Kernel (Claude Code) 输出日志
+        │   ├── train.log          # 训练脚本输出（Agent 重定向）
+        │   └── ...                # 其他脚本输出日志
+        ├── tb_logs/               # TensorBoard 日志
+        └── artifacts/             # 最终产物
+            ├── weights/
+            │   └── best.pt        # 最优权重
+            ├── reports/
+            │   └── eval.json      # 评估报告
+            └── export/
+                └── model.onnx     # 导出模型
 ```
 
 ---
 
 ## 5. 关键数据模型
 
-### 5.1 project.yaml
-
-```yaml
-project_id: sentiment-classifier
-description: "基于 Qwen2.5-7B 的评论情感分类"
-created_at: "2025-02-14T10:00:00Z"
-updated_at: "2025-02-14T12:00:00Z"
-```
-
-### 5.2 task.yaml
+### 5.1 task.yaml
 
 task.yaml 作为 Agent 上下文的一部分，包含完整的任务快照信息。超参详情见 `workspace/scripts/config.json`，评估详情见 `artifacts/reports/eval.json`，task.yaml 中保留摘要便于 Agent 快速了解全貌。
 
 ```yaml
 task_id: task-20250214-001
-project_id: sentiment-classifier
 status: completed            # pending | running | completed | failed | cancelled
 
 # ── 用户输入 ──
@@ -399,40 +378,30 @@ duration_seconds: 5100
 
 采用 RESTful 风格，JSON 格式。
 
-### 7.1 项目管理
+### 7.1 任务管理
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/projects` | 创建项目 |
-| GET | `/api/v1/projects` | 列出所有项目 |
-| GET | `/api/v1/projects/{project_id}` | 获取项目详情（含 task 列表） |
+| POST | `/api/v1/tasks` | 创建并启动 task |
+| GET | `/api/v1/tasks` | 列出所有 task |
+| GET | `/api/v1/tasks/{task_id}` | 获取 task 详情 |
+| POST | `/api/v1/tasks/{task_id}/cancel` | 取消运行中的 task |
+| POST | `/api/v1/tasks/{task_id}/retry` | 重试失败的 task |
 
-### 7.2 任务管理
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/projects/{project_id}/tasks` | 创建并启动 task |
-| GET | `/api/v1/projects/{project_id}/tasks` | 列出项目下所有 task |
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}` | 获取 task 详情 |
-| POST | `/api/v1/projects/{project_id}/tasks/{task_id}/cancel` | 取消运行中的 task |
-| POST | `/api/v1/projects/{project_id}/tasks/{task_id}/retry` | 重试失败的 task |
-
-### 7.3 日志与监控
+### 7.2 日志
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}/logs` | 获取日志（支持 `?follow=true` SSE 流式） |
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}/metrics` | 获取训练指标时序数据 |
+| GET | `/api/v1/tasks/{task_id}/logs` | 获取日志（支持 `?follow=true` SSE 流式） |
 
-### 7.4 Artifact 管理
+### 7.3 Artifact 管理
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}/artifacts` | 列出 artifact |
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}/artifacts/{path}` | 下载 artifact 文件 |
-| POST | `/api/v1/projects/{project_id}/tasks/{task_id}/artifacts/export` | 触发模型导出（如 ONNX） |
+| GET | `/api/v1/tasks/{task_id}/artifacts` | 列出 artifact |
+| GET | `/api/v1/tasks/{task_id}/artifacts/{path}` | 下载 artifact 文件 |
 
-### 7.5 系统状态
+### 7.4 系统状态
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -531,7 +500,7 @@ nvidia/cuda:12.1-runtime          # GPU 基础运行时
 | 挂载点 | 用途 |
 |--------|------|
 | `/mindbox/datasets` | 数据集目录（只读，用户自行管理） |
-| `/mindbox/projects` | 项目与 task 持久化 |
+| `/mindbox/tasks` | task 持久化 |
 | `/mindbox/models` | 模型缓存（HuggingFace cache） |
 | `/mindbox/skills` | 微调技能库（可扩展，用户可挂载自定义 Skill） |
 
@@ -543,7 +512,7 @@ nvidia/cuda:12.1-runtime          # GPU 基础运行时
 docker run -d --gpus all \
   -p 8080:8080 -p 6006:6006 \
   -v $(pwd)/data:/mindbox/datasets:ro \
-  -v $(pwd)/projects:/mindbox/projects \
+  -v $(pwd)/tasks:/mindbox/tasks \
   -v $(pwd)/mindbox-skills:/mindbox/skills \
   -v ~/.cache/huggingface:/mindbox/models \
   -e MINDBOX_KERNEL=claude-code \
@@ -570,8 +539,7 @@ mindbox/
 │       ├── commands/                   # 子命令实现
 │       │   ├── mod.rs
 │       │   ├── sandbox.rs              # sandbox start / stop / destroy
-│       │   ├── project.rs              # project create / edit
-│       │   └── task.rs                 # task start / stop / attach
+│       │   └── task.rs                 # task create / stop / attach / list
 │       ├── client.rs                   # HTTP / SSE 客户端
 │       └── ui.rs                       # ratatui 实时交互界面
 │
@@ -581,14 +549,12 @@ mindbox/
 │       ├── main.rs                     # 入口，axum 路由注册
 │       ├── routes/                     # API 路由层
 │       │   ├── mod.rs
-│       │   ├── projects.rs             # /api/v1/projects
-│       │   ├── tasks.rs                # /api/v1/projects/{id}/tasks
+│       │   ├── tasks.rs                # /api/v1/tasks
 │       │   ├── logs.rs                 # 日志流 (SSE)
 │       │   ├── artifacts.rs            # Artifact 下载与导出
 │       │   └── status.rs               # /health + /api/v1/status
 │       ├── services/                   # 业务逻辑层
 │       │   ├── mod.rs
-│       │   ├── project_service.rs      # 项目生命周期管理
 │       │   ├── task_service.rs         # 任务调度与状态机
 │       │   └── task_lock.rs            # 全局任务锁
 │       └── error.rs                    # 统一错误处理

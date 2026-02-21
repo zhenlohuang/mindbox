@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
-use mindbox_common::{
-    CancelTaskResponse, CreateProjectRequest, CreateTaskRequest, GetTaskResponse,
-    ListProjectsResponse, ListTasksResponse,
-};
+use mindbox_common::{CancelTaskResponse, CreateTaskRequest, GetTaskResponse, ListTasksResponse};
 
 #[derive(Clone)]
 pub struct MindboxClient {
@@ -18,44 +15,15 @@ impl MindboxClient {
         }
     }
 
-    pub fn logs_follow_url(&self, project_id: &str, task_id: &str) -> String {
+    pub fn logs_follow_url(&self, task_id: &str) -> String {
         format!(
-            "{}/api/v1/projects/{}/tasks/{}/logs?follow=true",
-            self.base_url, project_id, task_id
+            "{}/api/v1/tasks/{}/logs?follow=true",
+            self.base_url, task_id
         )
-    }
-
-    pub async fn create_project(
-        &self,
-        name: String,
-        description: Option<String>,
-    ) -> Result<mindbox_common::Project> {
-        let req = CreateProjectRequest { name, description };
-        self.http
-            .post(format!("{}/api/v1/projects", self.base_url))
-            .json(&req)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<mindbox_common::Project>()
-            .await
-            .context("parse create_project response")
-    }
-
-    pub async fn list_projects(&self) -> Result<ListProjectsResponse> {
-        self.http
-            .get(format!("{}/api/v1/projects", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<ListProjectsResponse>()
-            .await
-            .context("parse list_projects response")
     }
 
     pub async fn create_task(
         &self,
-        project_id: &str,
         dataset_path: String,
         task_description: String,
     ) -> Result<GetTaskResponse> {
@@ -65,10 +33,7 @@ impl MindboxClient {
         };
 
         self.http
-            .post(format!(
-                "{}/api/v1/projects/{}/tasks",
-                self.base_url, project_id
-            ))
+            .post(format!("{}/api/v1/tasks", self.base_url))
             .json(&req)
             .send()
             .await?
@@ -78,12 +43,9 @@ impl MindboxClient {
             .context("parse create_task response")
     }
 
-    pub async fn cancel_task(&self, project_id: &str, task_id: &str) -> Result<CancelTaskResponse> {
+    pub async fn cancel_task(&self, task_id: &str) -> Result<CancelTaskResponse> {
         self.http
-            .post(format!(
-                "{}/api/v1/projects/{}/tasks/{}/cancel",
-                self.base_url, project_id, task_id
-            ))
+            .post(format!("{}/api/v1/tasks/{}/cancel", self.base_url, task_id))
             .send()
             .await?
             .error_for_status()?
@@ -92,12 +54,9 @@ impl MindboxClient {
             .context("parse cancel_task response")
     }
 
-    pub async fn list_tasks(&self, project_id: &str) -> Result<ListTasksResponse> {
+    pub async fn list_tasks(&self) -> Result<ListTasksResponse> {
         self.http
-            .get(format!(
-                "{}/api/v1/projects/{}/tasks",
-                self.base_url, project_id
-            ))
+            .get(format!("{}/api/v1/tasks", self.base_url))
             .send()
             .await?
             .error_for_status()?

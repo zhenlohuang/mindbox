@@ -18,7 +18,7 @@ services:
     volumes:
       - ./mindbox-skills:/mindbox/skills
       - ./data/mindbox/datasets:/mindbox/datasets
-      - ./data/mindbox/projects:/mindbox/projects
+      - ./data/mindbox/tasks:/mindbox/tasks
       - ./data/mindbox/models:/mindbox/models
       - ./data/.claude:/home/mindbox/.claude
       - ./data/.cache:/home/mindbox/.cache

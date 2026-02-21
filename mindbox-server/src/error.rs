@@ -19,9 +19,7 @@ struct ErrorBody {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
-            MindboxError::ProjectNotFound(_) | MindboxError::TaskNotFound(_) => {
-                StatusCode::NOT_FOUND
-            }
+            MindboxError::TaskNotFound(_) => StatusCode::NOT_FOUND,
             MindboxError::TaskLockBusy => StatusCode::CONFLICT,
             MindboxError::InvalidStateTransition { .. } | MindboxError::Config(_) => {
                 StatusCode::BAD_REQUEST

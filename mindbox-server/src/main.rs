@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use mindbox_common::MindboxConfig;
 use mindbox_kernel::create_kernel;
-use services::{project_service::ProjectService, task_lock::TaskLockService};
+use services::task_lock::TaskLockService;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -28,9 +28,10 @@ async fn main() -> anyhow::Result<()> {
     let task_lock = Arc::new(TaskLockService::new());
     let (event_tx, _) = broadcast::channel(2048);
 
-    let project_service = ProjectService::new(config.clone());
-    project_service.ensure_storage_dirs().await?;
-    project_service.ensure_default_project().await?;
+    tokio::fs::create_dir_all(config.tasks_dir()).await?;
+    tokio::fs::create_dir_all(config.datasets_dir()).await?;
+    tokio::fs::create_dir_all(config.skills_dir()).await?;
+    tokio::fs::create_dir_all(config.models_dir()).await?;
 
     let state = AppState::new(config.clone(), kernel, task_lock, event_tx);
     let app = create_router(state)

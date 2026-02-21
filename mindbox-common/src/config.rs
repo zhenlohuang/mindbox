@@ -33,8 +33,8 @@ impl MindboxConfig {
         })
     }
 
-    pub fn projects_dir(&self) -> PathBuf {
-        self.data_root.join("projects")
+    pub fn tasks_dir(&self) -> PathBuf {
+        self.data_root.join("tasks")
     }
 
     pub fn datasets_dir(&self) -> PathBuf {

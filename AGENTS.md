@@ -14,7 +14,7 @@ This repository is a Rust workspace with four crates:
 - `cargo test --workspace`: run all unit and async tests.
 - `cargo run -p mindbox-server`: start server on `MINDBOX_PORT`/`PORT` (default `8080`).
 - `cargo run -p mindbox-cli -- --help`: inspect CLI commands.
-- `cargo run -p mindbox-cli -- task start --help`: inspect task options.
+- `cargo run -p mindbox-cli -- task create --help`: inspect task options.
 - `docker compose up --build mindbox`: run the full containerized stack.
 - `cargo fmt --all` and `cargo clippy --workspace --all-targets`: formatting and lint checks before PR.
 

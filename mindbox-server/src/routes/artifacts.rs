@@ -12,31 +12,28 @@ use crate::{error::ApiResult, services::task_service::TaskService, state::AppSta
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/tasks/{task_id}/artifacts", get(list_artifacts))
         .route(
-            "/api/v1/projects/{project_id}/tasks/{task_id}/artifacts",
-            get(list_artifacts),
-        )
-        .route(
-            "/api/v1/projects/{project_id}/tasks/{task_id}/artifacts/{*path}",
+            "/api/v1/tasks/{task_id}/artifacts/{*path}",
             get(download_artifact),
         )
 }
 
 async fn list_artifacts(
     State(state): State<AppState>,
-    Path((project_id, task_id)): Path<(String, String)>,
+    Path(task_id): Path<String>,
 ) -> ApiResult<Json<ListArtifactsResponse>> {
     let service = TaskService::new(state);
-    let artifacts = service.list_artifacts(&project_id, &task_id).await?;
+    let artifacts = service.list_artifacts(&task_id).await?;
     Ok(Json(ListArtifactsResponse { artifacts }))
 }
 
 async fn download_artifact(
     State(state): State<AppState>,
-    Path((project_id, task_id, path)): Path<(String, String, String)>,
+    Path((task_id, path)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let service = TaskService::new(state);
-    let file_path = service.artifact_path(&project_id, &task_id, &path).await?;
+    let file_path = service.artifact_path(&task_id, &path).await?;
     let data = tokio::fs::read(file_path)
         .await
         .map_err(MindboxError::from)?;

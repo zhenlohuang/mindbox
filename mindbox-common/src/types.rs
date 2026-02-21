@@ -2,18 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Project {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
-    pub project_id: String,
     pub dataset_path: String,
     pub task_description: String,
     pub status: TaskStatus,
@@ -109,23 +99,6 @@ pub enum TaskEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateProjectRequest {
-    pub name: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListProjectsResponse {
-    pub projects: Vec<Project>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetProjectResponse {
-    pub project: Project,
-    pub tasks: Vec<Task>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
     pub dataset_path: String,
     pub task_description: String,
@@ -167,7 +140,6 @@ pub struct ListArtifactsResponse {
 pub struct StatusResponse {
     pub kernel: String,
     pub running_task_id: Option<String>,
-    pub projects_count: usize,
     pub tasks_count: usize,
     pub timestamp: DateTime<Utc>,
 }
