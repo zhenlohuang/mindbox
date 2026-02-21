@@ -2,6 +2,7 @@ pub mod agent_instructions;
 pub mod callback;
 pub mod claude_code;
 pub mod codex;
+pub mod mock;
 pub mod prompt;
 pub mod skill_matcher;
 
@@ -11,7 +12,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use mindbox_common::{MindboxConfig, Project, Task};
 
-use crate::{claude_code::ClaudeCodeKernel, codex::CodexKernel};
+use crate::{claude_code::ClaudeCodeKernel, codex::CodexKernel, mock::MockKernel};
 
 #[derive(Debug, Clone)]
 pub struct DatasetMetadata {
@@ -49,6 +50,7 @@ pub trait Kernel: Send + Sync {
 pub fn create_kernel(config: &MindboxConfig) -> Arc<dyn Kernel> {
     match config.kernel.to_lowercase().as_str() {
         "codex" => Arc::new(CodexKernel::new()),
+        "mock" => Arc::new(MockKernel::new()),
         _ => Arc::new(ClaudeCodeKernel::new()),
     }
 }

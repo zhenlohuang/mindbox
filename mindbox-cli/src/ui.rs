@@ -14,7 +14,12 @@ pub async fn attach_logs(client: &MindboxClient, project_id: &str, task_id: &str
                 println!("connected to logs stream");
             }
             Ok(Event::Message(message)) => {
-                println!("{}", message.data);
+                let data = message.data;
+                println!("{data}");
+                if is_terminal_message(&data) {
+                    es.close();
+                    break;
+                }
             }
             Err(err) => {
                 eprintln!("log stream error: {err}");
@@ -24,4 +29,11 @@ pub async fn attach_logs(client: &MindboxClient, project_id: &str, task_id: &str
     }
 
     Ok(())
+}
+
+fn is_terminal_message(message: &str) -> bool {
+    matches!(
+        message.trim().to_ascii_lowercase().as_str(),
+        "task completed" | "task failed" | "task cancelled" | "task canceled"
+    )
 }
