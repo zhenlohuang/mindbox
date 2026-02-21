@@ -153,11 +153,6 @@ pub struct RetryTaskResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskEventsResponse {
-    pub events: Vec<TaskEvent>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactItem {
     pub path: String,
     pub size_bytes: u64,

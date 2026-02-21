@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, convert::Infallible, time::Duration};
+use std::{convert::Infallible, time::Duration};
 
 use async_stream::stream;
 use axum::{
@@ -7,10 +7,7 @@ use axum::{
     response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
     routing::get,
 };
-use chrono::{DateTime, Utc};
-use mindbox_common::{
-    format_stream_event, format_task_event, parse_log_timestamp, task_event_timestamp,
-};
+use mindbox_common::{format_stream_event, format_task_event};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -28,13 +25,6 @@ struct LogsQuery {
     follow: Option<bool>,
 }
 
-#[derive(Debug)]
-struct ReplayLine {
-    timestamp: Option<DateTime<Utc>>,
-    sequence: usize,
-    text: String,
-}
-
 async fn get_task_logs(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
@@ -43,16 +33,14 @@ async fn get_task_logs(
     let service = TaskService::new(state.clone());
 
     if query.follow.unwrap_or(false) {
-        let existing_logs = service.read_logs(&project_id, &task_id).await?;
-        let existing_events = service.list_events(&project_id, &task_id).await?;
-        let existing = merge_replay_lines(existing_logs, existing_events);
+        let existing = service.read_logs(&project_id, &task_id).await?;
 
         let mut rx = state.event_tx.subscribe();
         let project_filter = project_id.clone();
         let task_filter = task_id.clone();
 
         let body_stream = stream! {
-            for line in existing {
+            for line in existing.lines().map(format_stream_event) {
                 yield Ok::<Event, Infallible>(Event::default().data(line));
             }
 
@@ -87,37 +75,4 @@ async fn get_task_logs(
         .collect::<Vec<_>>()
         .join("\n");
     Ok(text.into_response())
-}
-
-fn merge_replay_lines(raw_logs: String, events: Vec<mindbox_common::TaskEvent>) -> Vec<String> {
-    let mut sequence = 0usize;
-    let mut lines = Vec::new();
-
-    for line in raw_logs.lines() {
-        lines.push(ReplayLine {
-            timestamp: parse_log_timestamp(line),
-            sequence,
-            text: format_stream_event(line),
-        });
-        sequence += 1;
-    }
-
-    for event in events {
-        lines.push(ReplayLine {
-            timestamp: Some(task_event_timestamp(&event)),
-            sequence,
-            text: format_task_event(&event),
-        });
-        sequence += 1;
-    }
-
-    lines.sort_by(compare_replay_lines);
-    lines.into_iter().map(|line| line.text).collect()
-}
-
-fn compare_replay_lines(left: &ReplayLine, right: &ReplayLine) -> Ordering {
-    match (left.timestamp, right.timestamp) {
-        (Some(a), Some(b)) => a.cmp(&b).then(left.sequence.cmp(&right.sequence)),
-        _ => left.sequence.cmp(&right.sequence),
-    }
 }

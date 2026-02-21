@@ -5,7 +5,6 @@ use axum::{
 };
 use mindbox_common::{
     CancelTaskResponse, CreateTaskRequest, GetTaskResponse, ListTasksResponse, RetryTaskResponse,
-    TaskEventsResponse,
 };
 
 use crate::{error::ApiResult, services::task_service::TaskService, state::AppState};
@@ -27,10 +26,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/projects/{project_id}/tasks/{task_id}/retry",
             post(retry_task),
-        )
-        .route(
-            "/api/v1/projects/{project_id}/tasks/{task_id}/events",
-            get(get_task_events),
         )
 }
 
@@ -81,13 +76,4 @@ async fn retry_task(
     let service = TaskService::new(state);
     let task = service.retry_task(&project_id, &task_id).await?;
     Ok(Json(RetryTaskResponse { task }))
-}
-
-async fn get_task_events(
-    State(state): State<AppState>,
-    Path((project_id, task_id)): Path<(String, String)>,
-) -> ApiResult<Json<TaskEventsResponse>> {
-    let service = TaskService::new(state);
-    let events = service.list_events(&project_id, &task_id).await?;
-    Ok(Json(TaskEventsResponse { events }))
 }

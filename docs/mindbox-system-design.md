@@ -284,7 +284,6 @@ SKILL.md 内容结构（CV 示例 — Object Detection）：
                 │   └── scripts/           # kernel 生成的脚本与配置
                 ├── logs/
                 │   ├── kernel.log         # Kernel (Claude Code) 输出日志
-                │   ├── events.jsonl       # 结构化事件日志
                 │   ├── train.log          # 训练脚本输出（Agent 重定向）
                 │   └── ...                # 其他脚本输出日志
                 ├── tb_logs/               # TensorBoard 日志
@@ -423,7 +422,6 @@ duration_seconds: 5100
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/projects/{project_id}/tasks/{task_id}/logs` | 获取日志（支持 `?follow=true` SSE 流式） |
-| GET | `/api/v1/projects/{project_id}/tasks/{task_id}/events` | 获取结构化事件 |
 | GET | `/api/v1/projects/{project_id}/tasks/{task_id}/metrics` | 获取训练指标时序数据 |
 
 ### 7.4 Artifact 管理

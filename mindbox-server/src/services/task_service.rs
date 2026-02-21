@@ -10,7 +10,6 @@ use mindbox_common::{
     TaskEvent, TaskResults, TaskStatus,
 };
 use mindbox_kernel::{DatasetMetadata, TaskContext, callback::KernelCallback};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use tracing::{error, warn};
 
 use crate::state::{AppState, BroadcastEvent};
@@ -150,25 +149,6 @@ impl TaskService {
         .await
     }
 
-    pub async fn list_events(&self, project_id: &str, task_id: &str) -> Result<Vec<TaskEvent>> {
-        self.get_task(project_id, task_id).await?;
-
-        let events_path = self.task_dir(project_id, task_id).join("logs/events.jsonl");
-        if !events_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let content = tokio::fs::read_to_string(events_path).await?;
-        let mut events = Vec::new();
-        for line in content.lines() {
-            if let Ok(event) = serde_json::from_str::<TaskEvent>(line) {
-                events.push(event);
-            }
-        }
-
-        Ok(events)
-    }
-
     pub async fn read_logs(&self, project_id: &str, task_id: &str) -> Result<String> {
         self.get_task(project_id, task_id).await?;
 
@@ -268,7 +248,6 @@ impl TaskService {
 struct BroadcastCallback {
     project_id: String,
     task_id: String,
-    events_path: PathBuf,
     tx: tokio::sync::broadcast::Sender<BroadcastEvent>,
 }
 
@@ -276,22 +255,16 @@ impl BroadcastCallback {
     fn new(
         project_id: String,
         task_id: String,
-        task_dir: PathBuf,
         tx: tokio::sync::broadcast::Sender<BroadcastEvent>,
     ) -> Self {
         Self {
             project_id,
             task_id,
-            events_path: task_dir.join("logs/events.jsonl"),
             tx,
         }
     }
 
     async fn emit_event(&self, event: TaskEvent) {
-        if let Ok(line) = serde_json::to_string(&event) {
-            let _ = append_line(&self.events_path, &line).await;
-        }
-
         let _ = self.tx.send(BroadcastEvent {
             project_id: self.project_id.clone(),
             task_id: self.task_id.clone(),
@@ -346,7 +319,6 @@ async fn run_kernel(
     let callback = Arc::new(BroadcastCallback::new(
         project.id.clone(),
         task.id.clone(),
-        task_dir.clone(),
         state.event_tx.clone(),
     ));
 
@@ -453,17 +425,6 @@ async fn collect_artifacts(root: &Path) -> Result<Vec<ArtifactItem>> {
     }
 
     Ok(out)
-}
-
-async fn append_line(path: &Path, line: &str) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    file.write_all(line.as_bytes()).await?;
-    file.write_all(b"\n").await?;
-    Ok(())
 }
 
 async fn load_task(task_file: &Path) -> Result<Task> {
