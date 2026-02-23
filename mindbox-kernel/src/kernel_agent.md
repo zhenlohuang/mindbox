@@ -13,19 +13,20 @@ The task working directory has the following structure. Create subdirectories as
 ```
 {task_dir}/
 ├── workspace/             # Agent writable workspace (scripts run with cwd=workspace/)
-│   └── scripts/           # Generated training scripts and configs (MUST place scripts here)
+│   ├── scripts/           # Generated training scripts and configs (MUST place scripts here)
+│   └── tb_logs/           # TensorBoard logs
 ├── logs/
 │   ├── kernel.log         # Kernel process log (auto-managed)
 │   ├── train.log          # Training script output (Agent redirects here)
 │   └── ...                # Other script output logs
-├── tb_logs/               # TensorBoard logs
 └── artifacts/             # Final outputs
     ├── weights/
     │   └── best.pt        # Best checkpoint weights
     ├── reports/
     │   └── eval.json      # Evaluation report
-    └── export/
-        └── model.onnx     # Exported model
+    ├── export/
+    │   └── model.onnx     # Exported model
+    └── tb_logs/           # Copied from workspace/tb_logs/ on completion
 ```
 
 ## Script Execution Rules

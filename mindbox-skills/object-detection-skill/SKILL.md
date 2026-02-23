@@ -135,20 +135,19 @@ reduce `imgsz`. See `references/hyperparameters.md` for tuning guidance.
 
 ### TensorBoard logs
 
-Ultralytics writes TensorBoard events to the training output directory. After training completes,
-copy the event files to `tb_logs/` so the Mindbox platform can serve them:
+The Mindbox container exposes TensorBoard on port 6006 reading from `workspace/tb_logs/`.
+Set the `TENSORBOARD_LOGDIR` environment variable before training so Ultralytics writes
+events directly there:
 
 ```python
-import os, shutil, glob
-
-tb_dst = os.path.join(os.environ.get("TASK_DIR", ".."), "tb_logs")
-os.makedirs(tb_dst, exist_ok=True)
-for f in glob.glob("train_output/events.out.tfevents.*"):
-    shutil.copy2(f, tb_dst)
+import os
+os.makedirs("tb_logs", exist_ok=True)
+os.environ["TENSORBOARD_LOGDIR"] = os.path.abspath("tb_logs")
 ```
 
-This copy step matters because the Mindbox container exposes TensorBoard on port 6006 reading
-from `tb_logs/` — if the files aren't there, the user can't monitor training progress.
+Place this before `model.train(...)`. Since the script's cwd is `workspace/`, this creates
+`workspace/tb_logs/`. With `tensorboard=True`, Ultralytics will write events straight there,
+allowing the user to monitor training progress in real time.
 
 ---
 
@@ -171,14 +170,10 @@ report = {
     "recall": float(metrics.box.mr),
 }
 
-artifacts_dir = os.path.join(os.environ.get("TASK_DIR", ".."), "artifacts", "reports")
-os.makedirs(artifacts_dir, exist_ok=True)
-with open(os.path.join(artifacts_dir, "eval.json"), "w") as f:
+os.makedirs(os.path.join("..", "artifacts", "reports"), exist_ok=True)
+with open(os.path.join("..", "artifacts", "reports", "eval.json"), "w") as f:
     json.dump(report, f, indent=2)
 ```
-
-Also copy Ultralytics' auto-generated visualizations (confusion matrix, PR curve, training
-curves) to `artifacts/reports/` — they help the user understand model behavior at a glance.
 
 ---
 
@@ -187,22 +182,31 @@ curves) to `artifacts/reports/` — they help the user understand model behavior
 Generate `workspace/scripts/export.py`. YOLO's removal of DFL makes ONNX export particularly
 clean — fewer custom ops means better compatibility across inference runtimes.
 
+This step also collects all final artifacts into the `artifacts/` directory — weights, ONNX model,
+and Ultralytics' auto-generated visualizations (confusion matrix, PR curve, training curves).
+
 ```python
 from ultralytics import YOLO
-import shutil, os
+import shutil, os, glob
 
+# Export ONNX
 model = YOLO("train_output/weights/best.pt")
 model.export(format="onnx", imgsz=640, simplify=True, opset=17)
 
-# Organize artifacts
-task_dir = os.environ.get("TASK_DIR", "..")
-artifacts = os.path.join(task_dir, "artifacts")
-
+# Collect artifacts (artifacts/ lives under task_dir, one level up from workspace/)
+artifacts = os.path.join("..", "artifacts")
 os.makedirs(os.path.join(artifacts, "weights"), exist_ok=True)
-shutil.copy2("train_output/weights/best.pt", os.path.join(artifacts, "weights", "best.pt"))
-
 os.makedirs(os.path.join(artifacts, "export"), exist_ok=True)
+os.makedirs(os.path.join(artifacts, "reports"), exist_ok=True)
+
+shutil.copy2("train_output/weights/best.pt", os.path.join(artifacts, "weights", "best.pt"))
 shutil.copy2("train_output/weights/best.onnx", os.path.join(artifacts, "export", "model.onnx"))
+
+for f in glob.glob("train_output/*.png"):  # confusion_matrix.png, PR_curve.png, results.png
+    shutil.copy2(f, os.path.join(artifacts, "reports"))
+
+# Copy TensorBoard logs to artifacts
+shutil.copytree("tb_logs", os.path.join(artifacts, "tb_logs"), dirs_exist_ok=True)
 ```
 
 Use `simplify=True` to reduce the ONNX graph — this improves inference performance on most
@@ -235,10 +239,9 @@ artifacts/
 │   ├── confusion_matrix.png  # Per-class confusion matrix
 │   ├── PR_curve.png          # Precision-Recall curve
 │   └── results.png           # Training loss/metric curves
-└── export/model.onnx         # ONNX exported model
-
-tb_logs/
-└── events.out.tfevents.*     # TensorBoard logs
+├── export/model.onnx         # ONNX exported model
+└── tb_logs/                   # TensorBoard logs (copied from workspace/tb_logs/)
+    └── events.out.tfevents.*
 ```
 
 ---
