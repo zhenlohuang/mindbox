@@ -1,0 +1,253 @@
+---
+name: object-detection
+description: >
+  Fine-tune YOLO object detection models on custom datasets, export to ONNX, with TensorBoard logging.
+  Use this skill whenever the user mentions object detection, YOLO fine-tuning, bounding box detection,
+  物体检测, 目标检测, 缺陷检测, or wants to detect/locate/identify objects in images — even if they
+  don't explicitly say "YOLO" or "object detection". Also applies to industrial defect detection,
+  medical imaging detection, autonomous driving perception, and security surveillance scenarios.
+compatibility:
+  requires:
+    - Bash
+    - Python (>= 3.8)
+  dependencies:
+    - ultralytics
+    - onnx
+---
+
+# Object Detection Fine-tuning
+
+This skill guides you through fine-tuning a YOLO model on a custom dataset and exporting the result
+as an ONNX model. YOLO is an end-to-end architecture (no NMS post-processing) that exports cleanly
+to ONNX — which is why it's the default choice here over older YOLO versions.
+
+## Workflow Overview
+
+```
+1. Inspect dataset → 2. Prepare data → 3. Install deps → 4. Train → 5. Evaluate → 6. Export ONNX
+```
+
+Follow these steps in order. Each step produces outputs that feed the next.
+
+---
+
+## Step 1: Inspect the Dataset
+
+Before writing any training code, understand what you're working with. Read the dataset directory
+structure and identify the format — this determines whether conversion is needed.
+
+Look for these patterns:
+- **YOLO format** (ready to use): `images/` + `labels/` directories with a `dataset.yaml`
+- **COCO format** (needs conversion): `annotations/*.json` + `images/`
+- **VOC format** (needs conversion): `Annotations/*.xml` + `JPEGImages/`
+
+Check `references/data-formats.md` for format details and conversion scripts.
+
+Also look at basic dataset health: how many images, how many classes, whether train/val splits
+exist. Unbalanced classes or missing splits will cause problems later — better to catch them now.
+
+---
+
+## Step 2: Prepare Data
+
+Generate `workspace/scripts/data_prep.py` to handle format conversion (if needed) and validation.
+
+The script should:
+- Convert to YOLO format if the source is COCO or VOC
+- Verify every image has a corresponding label file
+- Create train/val splits if they don't already exist (80/20 default)
+- Print dataset statistics: image count, class distribution, bounding box size distribution
+- Produce or validate a `dataset.yaml` pointing to the correct paths
+
+The `dataset.yaml` is what Ultralytics reads to find your data — getting the paths right here
+saves debugging time during training.
+
+**Example `dataset.yaml`:**
+```yaml
+path: /mindbox/datasets/<dataset_name>
+train: images/train
+val: images/val
+names:
+  0: class_a
+  1: class_b
+```
+
+---
+
+## Step 3: Install Dependencies
+
+Before training, ensure the required packages are available. Generate and run
+`workspace/scripts/setup.py` (or install inline) to install dependencies:
+
+```bash
+pip install ultralytics onnx
+```
+
+Ultralytics pulls in PyTorch and all other transitive dependencies automatically. The `onnx`
+package is needed later for export but installing it upfront avoids interrupting the pipeline.
+
+If the container already has these packages, this step is a no-op — `pip` will skip them.
+
+---
+
+## Step 4: Train
+
+Generate `workspace/scripts/train.py` using the Ultralytics Python API.
+
+### Pick the right model size
+
+Choose based on available GPU memory. Smaller models train faster and are easier to deploy;
+larger models are more accurate. When the user doesn't specify, default to `yolo26n`.
+
+| GPU Memory | Model | Why |
+|-----------|-------|-----|
+| < 8 GB | yolo26n | Fits comfortably, fast iteration |
+| 8–16 GB | yolo26s/m | Good accuracy-speed balance |
+| > 16 GB | yolo26l/x | Maximum accuracy |
+
+See `references/model-selection.md` for detailed benchmarks.
+
+### Training script structure
+
+```python
+from ultralytics import YOLO
+
+model = YOLO("yolo26n.pt")
+
+results = model.train(
+    data="/mindbox/datasets/<name>/dataset.yaml",
+    epochs=100,
+    imgsz=640,
+    batch=16,
+    device=0,
+    project=".",
+    name="train_output",
+    exist_ok=True,
+    tensorboard=True,      # enables TensorBoard logging
+    patience=20,           # early stopping — avoids wasting compute on plateaus
+    save=True,
+    save_period=10,
+)
+```
+
+Adjust `batch` and `imgsz` based on GPU memory. If training OOMs, halve `batch` first, then
+reduce `imgsz`. See `references/hyperparameters.md` for tuning guidance.
+
+### TensorBoard logs
+
+Ultralytics writes TensorBoard events to the training output directory. After training completes,
+copy the event files to `tb_logs/` so the Mindbox platform can serve them:
+
+```python
+import os, shutil, glob
+
+tb_dst = os.path.join(os.environ.get("TASK_DIR", ".."), "tb_logs")
+os.makedirs(tb_dst, exist_ok=True)
+for f in glob.glob("train_output/events.out.tfevents.*"):
+    shutil.copy2(f, tb_dst)
+```
+
+This copy step matters because the Mindbox container exposes TensorBoard on port 6006 reading
+from `tb_logs/` — if the files aren't there, the user can't monitor training progress.
+
+---
+
+## Step 5: Evaluate
+
+Training already runs validation each epoch. For a final evaluation (especially on a held-out
+test set), generate `workspace/scripts/eval.py`:
+
+```python
+from ultralytics import YOLO
+import json, os
+
+model = YOLO("train_output/weights/best.pt")
+metrics = model.val(data="dataset.yaml", split="test")
+
+report = {
+    "mAP50-95": float(metrics.box.map),
+    "mAP50": float(metrics.box.map50),
+    "precision": float(metrics.box.mp),
+    "recall": float(metrics.box.mr),
+}
+
+artifacts_dir = os.path.join(os.environ.get("TASK_DIR", ".."), "artifacts", "reports")
+os.makedirs(artifacts_dir, exist_ok=True)
+with open(os.path.join(artifacts_dir, "eval.json"), "w") as f:
+    json.dump(report, f, indent=2)
+```
+
+Also copy Ultralytics' auto-generated visualizations (confusion matrix, PR curve, training
+curves) to `artifacts/reports/` — they help the user understand model behavior at a glance.
+
+---
+
+## Step 6: Export to ONNX
+
+Generate `workspace/scripts/export.py`. YOLO's removal of DFL makes ONNX export particularly
+clean — fewer custom ops means better compatibility across inference runtimes.
+
+```python
+from ultralytics import YOLO
+import shutil, os
+
+model = YOLO("train_output/weights/best.pt")
+model.export(format="onnx", imgsz=640, simplify=True, opset=17)
+
+# Organize artifacts
+task_dir = os.environ.get("TASK_DIR", "..")
+artifacts = os.path.join(task_dir, "artifacts")
+
+os.makedirs(os.path.join(artifacts, "weights"), exist_ok=True)
+shutil.copy2("train_output/weights/best.pt", os.path.join(artifacts, "weights", "best.pt"))
+
+os.makedirs(os.path.join(artifacts, "export"), exist_ok=True)
+shutil.copy2("train_output/weights/best.onnx", os.path.join(artifacts, "export", "model.onnx"))
+```
+
+Use `simplify=True` to reduce the ONNX graph — this improves inference performance on most
+runtimes. Use `opset=17` for broad compatibility; lower it only if the target runtime requires it.
+
+---
+
+## Multi-GPU
+
+If multiple GPUs are available, pass a device list:
+
+```python
+model.train(data="dataset.yaml", device=[0, 1, 2, 3], ...)
+```
+
+Ultralytics handles DDP (Distributed Data Parallel) automatically. Scale `batch` linearly with
+GPU count (e.g., 4 GPUs → `batch=64`) to take full advantage of the parallelism.
+
+---
+
+## Final Artifact Checklist
+
+Before marking the task complete, verify all outputs exist:
+
+```
+artifacts/
+├── weights/best.pt           # Best checkpoint
+├── reports/
+│   ├── eval.json             # Evaluation metrics
+│   ├── confusion_matrix.png  # Per-class confusion matrix
+│   ├── PR_curve.png          # Precision-Recall curve
+│   └── results.png           # Training loss/metric curves
+└── export/model.onnx         # ONNX exported model
+
+tb_logs/
+└── events.out.tfevents.*     # TensorBoard logs
+```
+
+---
+
+## References
+
+For detailed information on specific topics, read these files as needed:
+
+- `references/model-selection.md` — Full model benchmark table with parameters, mAP, and inference speed
+- `references/data-formats.md` — Data format specifications, conversion scripts, and dataset.yaml examples
+- `references/hyperparameters.md` — Hyperparameter defaults, tuning ranges, and recommendations by scenario
+- `references/troubleshooting.md` — Common issues (OOM, convergence, small objects, export failures) and fixes
