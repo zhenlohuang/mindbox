@@ -14,18 +14,18 @@ services:
       MINDBOX_KERNEL: ${MINDBOX_KERNEL:-claude-code}
       MINDBOX_DATA_ROOT: /mindbox
       MINDBOX_PORT: "8080"
-    gpus: all
+    # gpus: all
     volumes:
-      - ./mindbox-skills:/mindbox/skills
+      - ./mindbox-skills:/home/mindbox/.claude/skills
       - ./data/mindbox/datasets:/mindbox/datasets
       - ./data/mindbox/tasks:/mindbox/tasks
       - ./data/mindbox/models:/mindbox/models
       - ./data/.claude:/home/mindbox/.claude
       - ./data/.cache:/home/mindbox/.cache
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
