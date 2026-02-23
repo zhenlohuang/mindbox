@@ -48,16 +48,13 @@ impl Kernel for ClaudeCodeKernel {
         let task_id = ctx.task.id.clone();
         let task_dir = ctx.task_dir.clone();
 
-        let system_prompt = prompt::build_system_prompt(&ctx);
         let user_prompt = prompt::build_user_prompt(&ctx);
 
         let mut cmd = Command::new("claude");
         cmd.arg("--print")
             .arg("--verbose")
             .arg("--output-format")
-            .arg("stream-json")
-            .arg("--system-prompt")
-            .arg(system_prompt);
+            .arg("stream-json");
 
         // Claude Code rejects bypass-permission mode for root/sudo users.
         if !running_as_root() {
