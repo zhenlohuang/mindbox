@@ -3,25 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use tokio::fs;
 
-pub fn build_agent_md() -> String {
-    r#"# Mindbox Kernel Agent
-
-## Script Execution Rules
-
-When running training, evaluation, or data preparation scripts:
-1. ALWAYS redirect stdout and stderr to a log file under logs/. Example:
-   mkdir -p logs && python workspace/scripts/train.py > logs/train.log 2>&1
-2. NEVER run scripts with output directly to terminal - this wastes your context window.
-3. After the script exits, check the exit code ($?).
-4. If the script FAILED (non-zero exit), read the last 50 lines of the log file to diagnose the error.
-5. If the script SUCCEEDED, read the last 20 lines to extract final metrics/results.
-
-## Directory Layout
-- workspace/scripts/ - generated training scripts and configs
-- logs/ - script execution logs (redirected stdout/stderr)
-- artifacts/ - final outputs (weights, reports, exported models)
-"#
-    .to_string()
+pub fn build_agent_md() -> &'static str {
+    include_str!("kernel_agent.md")
 }
 
 pub async fn ensure_agent_files(
