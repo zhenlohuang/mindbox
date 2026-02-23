@@ -26,7 +26,6 @@ pub struct TaskContext {
     pub task: Task,
     pub dataset: DatasetMetadata,
     pub task_dir: PathBuf,
-    pub skills_dir: PathBuf,
 }
 
 #[async_trait]

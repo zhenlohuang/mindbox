@@ -27,7 +27,7 @@ impl Default for CodexKernel {
 impl Kernel for CodexKernel {
     async fn execute(&self, ctx: TaskContext, _callback: Arc<dyn KernelCallback>) -> Result<()> {
         let agent_md = build_agent_md();
-        ensure_agent_files(&ctx.task_dir, &agent_md, Some(&ctx.skills_dir)).await?;
+        ensure_agent_files(&ctx.task_dir, &agent_md).await?;
         Err(anyhow!("codex kernel is not implemented yet"))
     }
 

@@ -41,10 +41,6 @@ impl MindboxConfig {
         self.data_root.join("datasets")
     }
 
-    pub fn skills_dir(&self) -> PathBuf {
-        self.data_root.join("skills")
-    }
-
     pub fn models_dir(&self) -> PathBuf {
         self.data_root.join("models")
     }

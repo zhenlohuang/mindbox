@@ -291,7 +291,6 @@ async fn run_kernel(state: AppState, task: Task, task_dir: PathBuf) -> Result<()
         task: task.clone(),
         dataset,
         task_dir: task_dir.clone(),
-        skills_dir: state.config.skills_dir(),
     };
 
     let result = state.kernel.execute(context, callback.clone()).await;

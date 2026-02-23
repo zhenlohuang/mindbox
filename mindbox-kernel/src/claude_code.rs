@@ -76,7 +76,7 @@ impl Kernel for ClaudeCodeKernel {
             .stderr(Stdio::piped());
 
         let agent_md = build_agent_md();
-        ensure_agent_files(&task_dir, &agent_md, Some(&ctx.skills_dir)).await?;
+        ensure_agent_files(&task_dir, &agent_md).await?;
 
         let mut child = cmd
             .spawn()

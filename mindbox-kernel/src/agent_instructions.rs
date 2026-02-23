@@ -7,11 +7,7 @@ pub fn build_agent_md() -> &'static str {
     include_str!("kernel_agent.md")
 }
 
-pub async fn ensure_agent_files(
-    task_dir: &Path,
-    agent_md: &str,
-    skills_dir: Option<&Path>,
-) -> Result<()> {
+pub async fn ensure_agent_files(task_dir: &Path, agent_md: &str) -> Result<()> {
     fs::write(task_dir.join("AGENT.md"), agent_md).await?;
 
     let claude_md_path = task_dir.join("CLAUDE.md");
@@ -19,37 +15,6 @@ pub async fn ensure_agent_files(
         fs::symlink("AGENT.md", &claude_md_path).await?;
     }
 
-    ensure_task_skills_link(task_dir, skills_dir).await?;
-
-    Ok(())
-}
-
-async fn ensure_task_skills_link(task_dir: &Path, skills_dir: Option<&Path>) -> Result<()> {
-    let Some(skills_dir) = skills_dir else {
-        return Ok(());
-    };
-
-    let Ok(metadata) = fs::symlink_metadata(skills_dir).await else {
-        return Ok(());
-    };
-    if !metadata.file_type().is_dir() {
-        return Ok(());
-    }
-
-    let claude_dir = task_dir.join(".claude");
-    fs::create_dir_all(&claude_dir).await?;
-
-    let task_skills_path = claude_dir.join("skills");
-    if let Ok(existing) = fs::symlink_metadata(&task_skills_path).await {
-        if existing.file_type().is_symlink() {
-            fs::remove_file(&task_skills_path).await?;
-        } else {
-            // Do not clobber non-symlink paths created by users/tools.
-            return Ok(());
-        }
-    }
-
-    fs::symlink(skills_dir, &task_skills_path).await?;
     Ok(())
 }
 
@@ -75,7 +40,7 @@ mod tests {
             .expect("create temp dir");
 
         let content = "# Mindbox Kernel Agent\nRule";
-        ensure_agent_files(&task_dir, content, None)
+        ensure_agent_files(&task_dir, content)
             .await
             .expect("write agent files");
 
@@ -105,60 +70,4 @@ mod tests {
             .expect("remove temp dir");
     }
 
-    #[tokio::test]
-    async fn ensure_agent_files_links_task_scoped_claude_skills() {
-        let root_dir = unique_temp_dir("mindbox-agent-files-skills");
-        let task_dir = root_dir.join("task");
-        let skills_dir = root_dir.join("skills");
-        fs::create_dir_all(&task_dir)
-            .await
-            .expect("create task temp dir");
-        fs::create_dir_all(&skills_dir)
-            .await
-            .expect("create skills temp dir");
-
-        ensure_agent_files(&task_dir, "# Agent", Some(&skills_dir))
-            .await
-            .expect("write agent files with skills");
-        ensure_agent_files(&task_dir, "# Agent", Some(&skills_dir))
-            .await
-            .expect("rerun agent file setup");
-
-        let task_skills_path = task_dir.join(".claude").join("skills");
-        let metadata = fs::symlink_metadata(&task_skills_path)
-            .await
-            .expect("symlink metadata");
-        assert!(metadata.file_type().is_symlink());
-
-        let target = fs::read_link(&task_skills_path).await.expect("read link");
-        assert_eq!(target, skills_dir);
-
-        fs::remove_dir_all(&root_dir)
-            .await
-            .expect("remove temp dir");
-    }
-
-    #[tokio::test]
-    async fn ensure_agent_files_skips_missing_skills_dir() {
-        let root_dir = unique_temp_dir("mindbox-agent-files-missing-skills");
-        let task_dir = root_dir.join("task");
-        let missing_skills_dir = root_dir.join("missing-skills");
-        fs::create_dir_all(&task_dir)
-            .await
-            .expect("create task temp dir");
-
-        ensure_agent_files(&task_dir, "# Agent", Some(&missing_skills_dir))
-            .await
-            .expect("write agent files without skills dir");
-
-        assert!(
-            fs::symlink_metadata(task_dir.join(".claude").join("skills"))
-                .await
-                .is_err()
-        );
-
-        fs::remove_dir_all(&root_dir)
-            .await
-            .expect("remove temp dir");
-    }
 }

@@ -30,7 +30,6 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::fs::create_dir_all(config.tasks_dir()).await?;
     tokio::fs::create_dir_all(config.datasets_dir()).await?;
-    tokio::fs::create_dir_all(config.skills_dir()).await?;
     tokio::fs::create_dir_all(config.models_dir()).await?;
 
     let state = AppState::new(config.clone(), kernel, task_lock, event_tx);
