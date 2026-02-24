@@ -24,10 +24,29 @@ to ONNX — which is why it's the default choice here over older YOLO versions.
 ## Workflow Overview
 
 ```
-1. Inspect dataset → 2. Prepare data → 3. Install deps → 4. Train → 5. Evaluate → 6. Export ONNX
+0. Discover GPU → 1. Inspect dataset → 2. Prepare data → 3. Install deps → 4. Train → 5. Evaluate → 6. Export ONNX
 ```
 
 Follow these steps in order. Each step produces outputs that feed the next.
+
+---
+
+## Step 0: Discover GPU
+
+Before anything else, detect the available hardware so later steps can make informed choices
+about model size and batch size.
+
+1. Run the GPU discovery script:
+```bash
+python /home/mindbox/.claude/skills/gpu-discovery-skill/scripts/detect_gpu.py
+```
+
+2. Read `workspace/gpu_info.json` to determine the hardware mode (`gpu` or `cpu`).
+
+3. Use the `memory_free_mb` value to guide model selection in Step 4:
+   - **No GPU / < 8 GB** → `yolo26n`
+   - **8–16 GB** → `yolo26s` or `yolo26m`
+   - **> 16 GB** → `yolo26l` or `yolo26x`
 
 ---
 
@@ -76,17 +95,16 @@ names:
 
 ## Step 3: Install Dependencies
 
-Before training, ensure the required packages are available. Generate and run
-`workspace/scripts/setup.py` (or install inline) to install dependencies:
+Before training, install the required packages from the skill's `requirements.txt`:
 
 ```bash
-pip install ultralytics onnx
+uv pip install --system -r /home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt
 ```
 
 Ultralytics pulls in PyTorch and all other transitive dependencies automatically. The `onnx`
 package is needed later for export but installing it upfront avoids interrupting the pipeline.
 
-If the container already has these packages, this step is a no-op — `pip` will skip them.
+If the container already has these packages, this step is a no-op — they will be skipped.
 
 ---
 
@@ -96,8 +114,9 @@ Generate `workspace/scripts/train.py` using the Ultralytics Python API.
 
 ### Pick the right model size
 
-Choose based on available GPU memory. Smaller models train faster and are easier to deploy;
-larger models are more accurate. When the user doesn't specify, default to `yolo26n`.
+Read `workspace/gpu_info.json` (produced by Step 0) and use the `memory_free_mb` value to
+select the appropriate model. Smaller models train faster and are easier to deploy; larger
+models are more accurate. When the user doesn't specify, default to `yolo26n`.
 
 | GPU Memory | Model | Why |
 |-----------|-------|-----|

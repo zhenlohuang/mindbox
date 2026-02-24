@@ -25,12 +25,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb1 \
     python3 \
     python3-pip \
+    python3-venv \
     supervisor \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages tensorboard
+RUN pip3 install --no-cache-dir --break-system-packages \
+    uv \
+    tensorboard
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /mindbox

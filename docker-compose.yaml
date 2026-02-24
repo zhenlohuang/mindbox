@@ -17,9 +17,9 @@ services:
     # gpus: all
     volumes:
       - ./mindbox-skills:/home/mindbox/.claude/skills
-      - ./data/mindbox/datasets:/mindbox/datasets
+      - ./data/datasets:/mindbox/datasets
+      - ./data/models:/mindbox/models
       - ./data/mindbox/tasks:/mindbox/tasks
-      - ./data/mindbox/models:/mindbox/models
       - ./data/.claude:/home/mindbox/.claude
       - ./data/.cache:/home/mindbox/.cache
     # deploy:
