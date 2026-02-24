@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::tui::app::{App, FocusedPanel, LogEntry, TrainingEntry};
+use crate::tui::app::{App, LogEntry};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let outer = Layout::default()
@@ -98,54 +98,22 @@ fn render_task_info(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &Ap
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
-    let kernel_style = if app.focused == FocusedPanel::Kernel {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    let training_style = if app.focused == FocusedPanel::Training {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                if app.focused == FocusedPanel::Kernel {
-                    "> "
-                } else {
-                    "  "
-                },
-                kernel_style,
-            ),
-            Span::styled("Kernel Output", kernel_style),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                if app.focused == FocusedPanel::Training {
-                    "> "
-                } else {
-                    "  "
-                },
-                training_style,
-            ),
-            Span::styled("Training Logs", training_style),
-        ]),
-    ];
+    let mut lines = vec![Line::from("")];
+    lines.push(sidebar_line("kernel.log", app.focused_index == 0));
+    for (index, panel) in app.log_panels.iter().enumerate() {
+        lines.push(sidebar_line(
+            &panel.filename,
+            app.focused_index == index + 1,
+        ));
+    }
 
     let widget = Paragraph::new(lines).block(Block::default().borders(Borders::ALL));
     frame.render_widget(widget, area);
 }
 
 fn render_active_panel(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &mut App) {
-    let (lines, offset, auto_scroll) = match app.focused {
-        FocusedPanel::Kernel => (
+    let (lines, offset, auto_scroll) = match app.focused_index {
+        0 => (
             kernel_lines(
                 &app.kernel_logs,
                 app.expand_thinking,
@@ -154,18 +122,21 @@ fn render_active_panel(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: 
             app.kernel_scroll.offset,
             app.kernel_scroll.auto_scroll,
         ),
-        FocusedPanel::Training => (
-            training_lines(&app.training_logs),
-            app.training_scroll.offset,
-            app.training_scroll.auto_scroll,
-        ),
+        index => match app.log_panels.get(index - 1) {
+            Some(panel) => (
+                plain_log_lines(&panel.lines),
+                panel.scroll.offset,
+                panel.scroll.auto_scroll,
+            ),
+            None => (plain_log_lines(&[]), 0, true),
+        },
     };
 
     let content_width = area.width.saturating_sub(2).max(1) as usize;
     let total_visual_lines = visual_line_count(&lines, content_width);
     let viewport = area.height.saturating_sub(2) as usize;
     let max_offset = total_visual_lines.saturating_sub(viewport);
-    app.set_panel_max_offset(app.focused, max_offset);
+    app.set_panel_max_offset(app.focused_index, max_offset);
     let scroll = effective_scroll(offset, auto_scroll, total_visual_lines, area.height);
 
     let widget = Paragraph::new(lines)
@@ -180,29 +151,35 @@ fn render_active_panel(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: 
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
-    let text = match app.focused {
-        FocusedPanel::Kernel => {
-            let thinking_state = if app.expand_thinking {
-                "expanded".to_string()
-            } else {
-                "collapsed".to_string()
-            };
-            let tool_use_state = if app.expand_tool_results {
-                "expanded".to_string()
-            } else {
-                "collapsed".to_string()
-            };
-            format!(
-                "{} | Switch Panel(tab): Kernel Output | Thinking(t): {} | Tool Use(o): {}",
-                app.connection_status, thinking_state, tool_use_state
-            )
-        }
-        FocusedPanel::Training => {
-            format!(
-                "{} | Switch Panel(tab): Training Logs",
-                app.connection_status
-            )
-        }
+    let panel_name = if app.focused_index == 0 {
+        "kernel.log".to_string()
+    } else {
+        app.log_panels
+            .get(app.focused_index - 1)
+            .map(|panel| panel.filename.clone())
+            .unwrap_or_else(|| "Unknown".to_string())
+    };
+
+    let text = if app.focused_index == 0 {
+        let thinking_state = if app.expand_thinking {
+            "expanded".to_string()
+        } else {
+            "collapsed".to_string()
+        };
+        let tool_use_state = if app.expand_tool_results {
+            "expanded".to_string()
+        } else {
+            "collapsed".to_string()
+        };
+        format!(
+            "{} | Switch Panel(tab): {} | Thinking(t): {} | Tool Use(o): {}",
+            app.connection_status, panel_name, thinking_state, tool_use_state
+        )
+    } else {
+        format!(
+            "{} | Switch Panel(tab): {}",
+            app.connection_status, panel_name
+        )
     };
 
     let widget = Paragraph::new(text).style(Style::default().fg(Color::Black).bg(Color::Gray));
@@ -335,46 +312,30 @@ fn kernel_lines(
     out
 }
 
-fn training_lines(entries: &[TrainingEntry]) -> Vec<Line<'static>> {
+fn plain_log_lines(lines: &[String]) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    for entry in entries {
-        match entry {
-            TrainingEntry::Status { status, message } => out.push(Line::from(vec![
-                Span::styled(
-                    format!("[{status}] "),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(message.clone(), Style::default().fg(Color::White)),
-            ])),
-            TrainingEntry::Metric { name, value, step } => {
-                let line = if let Some(step) = step {
-                    format!("{name} = {value} step={step}")
-                } else {
-                    format!("{name} = {value}")
-                };
-                out.push(Line::from(vec![Span::styled(
-                    line,
-                    Style::default().fg(Color::Cyan),
-                )]));
-            }
-            TrainingEntry::Error(message) => out.push(Line::from(vec![
-                Span::styled(
-                    "[error] ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(message.clone(), Style::default().fg(Color::White)),
-            ])),
-            TrainingEntry::Log(line) => {
-                push_multiline(&mut out, line, Style::default().fg(Color::White), "");
-            }
-        }
+    for line in lines {
+        push_multiline(&mut out, line, Style::default().fg(Color::White), "");
     }
     if out.is_empty() {
-        out.push(Line::from("Waiting for training output..."));
+        out.push(Line::from("Waiting for output..."));
     }
     out
+}
+
+fn sidebar_line(label: &str, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    Line::from(vec![
+        Span::styled(if focused { "> " } else { "  " }, style),
+        Span::styled(label.to_string(), style),
+    ])
 }
 
 fn push_multiline(lines: &mut Vec<Line<'static>>, text: &str, style: Style, prefix: &str) {

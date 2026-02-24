@@ -1,4 +1,8 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEventKind};
 use futures::StreamExt;
@@ -23,7 +27,8 @@ pub enum AppEvent {
     StreamConnected,
     StreamEnded,
     TaskInfo(Box<Task>),
-    TrainLog(String),
+    LogLine { filename: String, line: String },
+    LogFileDiscovered(String),
     ScrollUp,
     ScrollDown,
     Tick,
@@ -162,65 +167,91 @@ pub fn spawn_tick(tx: mpsc::Sender<AppEvent>, duration: Duration) -> JoinHandle<
     })
 }
 
-pub fn spawn_train_log_tailer(task_id: String, tx: mpsc::Sender<AppEvent>) -> JoinHandle<()> {
+pub fn spawn_log_dir_watcher(task_id: String, tx: mpsc::Sender<AppEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = time::interval(Duration::from_millis(300));
+        let mut ticker = time::interval(Duration::from_millis(500));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
-        let mut path: Option<PathBuf> = None;
-        let mut offset: u64 = 0;
-        let mut pending = String::new();
+        let mut logs_dir: Option<PathBuf> = None;
+        let mut file_states: HashMap<String, (u64, String)> = HashMap::new();
 
         loop {
             ticker.tick().await;
 
-            if path.is_none() {
-                path = resolve_train_log_path(&task_id).await;
-                if path.is_none() {
+            if logs_dir.is_none() {
+                logs_dir = resolve_logs_dir(&task_id).await;
+                if logs_dir.is_none() {
                     continue;
                 }
             }
 
-            let current_path = match path.as_ref() {
+            let current_logs_dir = match logs_dir.as_ref() {
                 Some(path) => path,
                 None => continue,
             };
 
-            let Ok(metadata) = fs::metadata(current_path).await else {
-                path = None;
-                offset = 0;
-                pending.clear();
+            let Ok(mut entries) = fs::read_dir(current_logs_dir).await else {
+                logs_dir = None;
+                file_states.clear();
                 continue;
             };
 
-            if metadata.len() < offset {
-                offset = 0;
-                pending.clear();
+            let mut files = Vec::new();
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let Some(filename) = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(ToOwned::to_owned)
+                else {
+                    continue;
+                };
+
+                if filename == "kernel.log" {
+                    continue;
+                }
+
+                let Ok(metadata) = entry.metadata().await else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+
+                files.push((filename, path));
+            }
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+
+            let present_files: HashSet<&str> = files
+                .iter()
+                .map(|(filename, _)| filename.as_str())
+                .collect();
+            file_states.retain(|filename, _| present_files.contains(filename.as_str()));
+
+            for (filename, _) in &files {
+                if file_states.contains_key(filename) {
+                    continue;
+                }
+                file_states.insert(filename.clone(), (0, String::new()));
+                if tx
+                    .send(AppEvent::LogFileDiscovered(filename.clone()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
 
-            let Ok(mut file) = File::open(current_path).await else {
-                continue;
-            };
+            for (filename, path) in files {
+                let (mut offset, mut pending) = file_states
+                    .remove(&filename)
+                    .unwrap_or_else(|| (0, String::new()));
 
-            if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
-                continue;
-            }
+                let keep_running =
+                    tail_log_file(&path, &filename, &tx, &mut offset, &mut pending).await;
 
-            let mut chunk = Vec::new();
-            if file.read_to_end(&mut chunk).await.is_err() {
-                continue;
-            }
-            if chunk.is_empty() {
-                continue;
-            }
-
-            offset = offset.saturating_add(chunk.len() as u64);
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(pos) = pending.find('\n') {
-                let line = pending[..pos].trim_end_matches('\r').to_string();
-                pending = pending[pos + 1..].to_string();
-                if tx.send(AppEvent::TrainLog(line)).await.is_err() {
+                file_states.insert(filename, (offset, pending));
+                if !keep_running {
                     return;
                 }
             }
@@ -228,17 +259,73 @@ pub fn spawn_train_log_tailer(task_id: String, tx: mpsc::Sender<AppEvent>) -> Jo
     })
 }
 
-async fn resolve_train_log_path(task_id: &str) -> Option<PathBuf> {
+async fn tail_log_file(
+    path: &Path,
+    filename: &str,
+    tx: &mpsc::Sender<AppEvent>,
+    offset: &mut u64,
+    pending: &mut String,
+) -> bool {
+    let Ok(metadata) = fs::metadata(path).await else {
+        *offset = 0;
+        pending.clear();
+        return true;
+    };
+
+    if metadata.len() < *offset {
+        *offset = 0;
+        pending.clear();
+    }
+
+    let Ok(mut file) = File::open(path).await else {
+        return true;
+    };
+
+    if file.seek(std::io::SeekFrom::Start(*offset)).await.is_err() {
+        return true;
+    }
+
+    let mut chunk = Vec::new();
+    if file.read_to_end(&mut chunk).await.is_err() || chunk.is_empty() {
+        return true;
+    }
+
+    *offset = (*offset).saturating_add(chunk.len() as u64);
+    pending.push_str(&String::from_utf8_lossy(&chunk));
+
+    while let Some(pos) = pending.find('\n') {
+        let line = pending[..pos].trim_end_matches('\r').to_string();
+        let remaining = pending[pos + 1..].to_string();
+        *pending = remaining;
+        if tx
+            .send(AppEvent::LogLine {
+                filename: filename.to_string(),
+                line,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub async fn resolve_logs_dir(task_id: &str) -> Option<PathBuf> {
     let fixed_candidates = [
-        format!("data/mindbox/tasks/{task_id}/logs/train.log"),
-        format!("data/mindbox/projects/default/tasks/{task_id}/logs/train.log"),
-        format!("/mindbox/tasks/{task_id}/logs/train.log"),
-        format!("/mindbox/projects/default/tasks/{task_id}/logs/train.log"),
+        format!("data/mindbox/tasks/{task_id}/logs"),
+        format!("data/mindbox/projects/default/tasks/{task_id}/logs"),
+        format!("/mindbox/tasks/{task_id}/logs"),
+        format!("/mindbox/projects/default/tasks/{task_id}/logs"),
     ];
 
     for candidate in fixed_candidates {
         let path = PathBuf::from(candidate);
-        if fs::metadata(&path).await.is_ok() {
+        let Ok(metadata) = fs::metadata(&path).await else {
+            continue;
+        };
+        if metadata.is_dir() {
             return Some(path);
         }
     }
@@ -253,9 +340,11 @@ async fn resolve_train_log_path(task_id: &str) -> Option<PathBuf> {
                 .path()
                 .join("tasks")
                 .join(task_id)
-                .join("logs")
-                .join("train.log");
-            if fs::metadata(&path).await.is_ok() {
+                .join("logs");
+            let Ok(metadata) = fs::metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_dir() {
                 return Some(path);
             }
         }

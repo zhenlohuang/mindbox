@@ -16,7 +16,10 @@ mod event;
 mod render;
 
 use app::App;
-use event::{AppEvent, spawn_sse_reader, spawn_task_poller, spawn_terminal_events, spawn_tick};
+use event::{
+    AppEvent, spawn_log_dir_watcher, spawn_sse_reader, spawn_task_poller, spawn_terminal_events,
+    spawn_tick,
+};
 
 pub async fn run(client: &MindboxClient, task_id: &str) -> Result<()> {
     let mut guard = TerminalGuard::activate()?;
@@ -32,7 +35,7 @@ pub async fn run(client: &MindboxClient, task_id: &str) -> Result<()> {
     spawn_terminal_events(tx.clone());
     spawn_sse_reader(client_for_sse, task_id_owned.clone(), tx.clone());
     spawn_task_poller(client_for_poller, task_id_owned.clone(), tx.clone());
-    event::spawn_train_log_tailer(task_id_owned.clone(), tx.clone());
+    spawn_log_dir_watcher(task_id_owned.clone(), tx.clone());
     spawn_tick(tx, Duration::from_millis(200));
 
     let mut app = App::new(task_id_owned);

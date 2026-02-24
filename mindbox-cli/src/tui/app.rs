@@ -15,27 +15,6 @@ pub enum LogEntry {
     Raw(String),
 }
 
-#[derive(Debug, Clone)]
-pub enum TrainingEntry {
-    Status {
-        status: String,
-        message: String,
-    },
-    Metric {
-        name: String,
-        value: String,
-        step: Option<u64>,
-    },
-    Error(String),
-    Log(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusedPanel {
-    Kernel,
-    Training,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollState {
     pub offset: usize,
@@ -51,21 +30,26 @@ impl Default for ScrollState {
     }
 }
 
+pub struct LogPanel {
+    pub filename: String,
+    pub lines: Vec<String>,
+    pub scroll: ScrollState,
+    pub max_offset: usize,
+}
+
 pub struct App {
     pub task_id: String,
     pub task: Option<Task>,
     pub kernel_logs: Vec<LogEntry>,
-    pub training_logs: Vec<TrainingEntry>,
-    pub focused: FocusedPanel,
+    pub log_panels: Vec<LogPanel>,
+    pub focused_index: usize,
     pub kernel_scroll: ScrollState,
-    pub training_scroll: ScrollState,
     pub connection_status: String,
     pub should_quit: bool,
     pub stream_ended: bool,
     pub expand_tool_results: bool,
     pub expand_thinking: bool,
     pub kernel_max_offset: usize,
-    pub training_max_offset: usize,
 }
 
 impl App {
@@ -74,17 +58,15 @@ impl App {
             task_id,
             task: None,
             kernel_logs: Vec::new(),
-            training_logs: Vec::new(),
-            focused: FocusedPanel::Kernel,
+            log_panels: Vec::new(),
+            focused_index: 0,
             kernel_scroll: ScrollState::default(),
-            training_scroll: ScrollState::default(),
             connection_status: "Connecting".to_string(),
             should_quit: false,
             stream_ended: false,
             expand_tool_results: false,
             expand_thinking: false,
             kernel_max_offset: 0,
-            training_max_offset: 0,
         }
     }
 
@@ -106,7 +88,10 @@ impl App {
                 self.connection_status = "Stream ended".to_string();
             }
             AppEvent::TaskInfo(task) => self.task = Some(*task),
-            AppEvent::TrainLog(line) => self.handle_train_log_line(line),
+            AppEvent::LogLine { filename, line } => self.push_to_panel(&filename, line),
+            AppEvent::LogFileDiscovered(filename) => {
+                let _ = self.find_or_create_panel(&filename);
+            }
             AppEvent::Tick => {}
         }
     }
@@ -132,10 +117,7 @@ impl App {
                 self.refresh_kernel_scroll_after_view_change();
             }
             KeyCode::Tab => {
-                self.focused = match self.focused {
-                    FocusedPanel::Kernel => FocusedPanel::Training,
-                    FocusedPanel::Training => FocusedPanel::Kernel,
-                };
+                self.focused_index = (self.focused_index + 1) % self.panel_count();
             }
             KeyCode::Up => self.scroll_up(3),
             KeyCode::Down => self.scroll_down(3),
@@ -151,9 +133,10 @@ impl App {
     }
 
     fn focused_scroll_mut(&mut self) -> &mut ScrollState {
-        match self.focused {
-            FocusedPanel::Kernel => &mut self.kernel_scroll,
-            FocusedPanel::Training => &mut self.training_scroll,
+        if self.focused_index == 0 {
+            &mut self.kernel_scroll
+        } else {
+            &mut self.log_panels[self.focused_index - 1].scroll
         }
     }
 
@@ -183,16 +166,18 @@ impl App {
     }
 
     fn focused_max_offset(&self) -> usize {
-        match self.focused {
-            FocusedPanel::Kernel => self.kernel_max_offset,
-            FocusedPanel::Training => self.training_max_offset,
+        if self.focused_index == 0 {
+            self.kernel_max_offset
+        } else {
+            self.log_panels[self.focused_index - 1].max_offset
         }
     }
 
-    pub fn set_panel_max_offset(&mut self, panel: FocusedPanel, max_offset: usize) {
-        match panel {
-            FocusedPanel::Kernel => self.kernel_max_offset = max_offset,
-            FocusedPanel::Training => self.training_max_offset = max_offset,
+    pub fn set_panel_max_offset(&mut self, panel_index: usize, max_offset: usize) {
+        if panel_index == 0 {
+            self.kernel_max_offset = max_offset;
+        } else if let Some(panel) = self.log_panels.get_mut(panel_index - 1) {
+            panel.max_offset = max_offset;
         }
     }
 
@@ -208,10 +193,10 @@ impl App {
             TaskEvent::StatusUpdate {
                 status, message, ..
             } => {
-                self.push_training(TrainingEntry::Status {
-                    status: format_status(status).to_string(),
-                    message,
-                });
+                self.push_to_panel(
+                    "events.log",
+                    format!("[status: {}] {}", format_status(status), message),
+                );
                 if matches!(
                     status,
                     TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
@@ -221,13 +206,16 @@ impl App {
                 }
             }
             TaskEvent::Metric { metric, .. } => {
-                self.push_training(TrainingEntry::Metric {
-                    name: metric.name,
-                    value: metric.value.to_string(),
-                    step: metric.step,
-                });
+                let line = if let Some(step) = metric.step {
+                    format!("[metric] {} = {} step={step}", metric.name, metric.value)
+                } else {
+                    format!("[metric] {} = {}", metric.name, metric.value)
+                };
+                self.push_to_panel("events.log", line);
             }
-            TaskEvent::Error { message, .. } => self.push_training(TrainingEntry::Error(message)),
+            TaskEvent::Error { message, .. } => {
+                self.push_to_panel("events.log", format!("[error] {message}"));
+            }
         }
     }
 
@@ -244,11 +232,6 @@ impl App {
             return;
         }
 
-        if let Some(entry) = parse_training_entry(&message) {
-            self.push_training(entry);
-            return;
-        }
-
         if let Some(entry) = parse_jsonl_fallback_entry(&message) {
             self.push_kernel(entry);
             return;
@@ -260,25 +243,54 @@ impl App {
         }
     }
 
-    fn handle_train_log_line(&mut self, line: String) {
+    pub fn find_or_create_panel(&mut self, filename: &str) -> usize {
+        if let Some(position) = self.log_panels.iter().position(|p| p.filename == filename) {
+            return position + 1;
+        }
+
+        let insert_at = self
+            .log_panels
+            .partition_point(|panel| panel.filename.as_str() < filename);
+        self.log_panels.insert(
+            insert_at,
+            LogPanel {
+                filename: filename.to_string(),
+                lines: Vec::new(),
+                scroll: ScrollState::default(),
+                max_offset: 0,
+            },
+        );
+
+        let global_index = insert_at + 1;
+        if self.focused_index > 0 && self.focused_index >= global_index {
+            self.focused_index += 1;
+        }
+
+        global_index
+    }
+
+    pub fn push_to_panel(&mut self, filename: &str, line: String) {
+        let panel_index = self.find_or_create_panel(filename);
         let line = sanitize_line_for_display(&line);
         if line.is_empty() {
             return;
         }
-        self.push_training(TrainingEntry::Log(line));
+        if let Some(panel) = self.log_panels.get_mut(panel_index - 1) {
+            panel.lines.push(line);
+            if panel.scroll.auto_scroll {
+                panel.scroll.offset = panel.lines.len();
+            }
+        }
+    }
+
+    pub fn panel_count(&self) -> usize {
+        1 + self.log_panels.len()
     }
 
     fn push_kernel(&mut self, entry: LogEntry) {
         self.kernel_logs.push(entry);
         if self.kernel_scroll.auto_scroll {
             self.kernel_scroll.offset = self.kernel_total_lines();
-        }
-    }
-
-    fn push_training(&mut self, entry: TrainingEntry) {
-        self.training_logs.push(entry);
-        if self.training_scroll.auto_scroll {
-            self.training_scroll.offset = self.training_total_lines();
         }
     }
 
@@ -325,18 +337,6 @@ impl App {
             }
         }
         total
-    }
-
-    pub fn training_total_lines(&self) -> usize {
-        self.training_logs
-            .iter()
-            .map(|entry| match entry {
-                TrainingEntry::Status { message, .. }
-                | TrainingEntry::Error(message)
-                | TrainingEntry::Log(message) => message.lines().count().max(1),
-                TrainingEntry::Metric { .. } => 1,
-            })
-            .sum()
     }
 }
 
@@ -648,41 +648,6 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
     }
 
     Some(LogEntry::SystemMessage(summary))
-}
-
-fn parse_training_entry(line: &str) -> Option<TrainingEntry> {
-    let trimmed = line.trim();
-    if let Some(content) = trimmed.strip_prefix("[error]") {
-        return Some(TrainingEntry::Error(content.trim().to_string()));
-    }
-
-    if let Some(content) = trimmed
-        .strip_prefix("[status:")
-        .and_then(|s| s.split_once(']'))
-    {
-        let status = content.0.trim().to_string();
-        let message = content.1.trim().to_string();
-        return Some(TrainingEntry::Status { status, message });
-    }
-
-    if let Some(metric_text) = trimmed.strip_prefix("[metric]") {
-        return parse_metric_line(metric_text.trim());
-    }
-
-    None
-}
-
-fn parse_metric_line(line: &str) -> Option<TrainingEntry> {
-    let (name, right) = line.split_once('=')?;
-    let (value, step) = match right.split_once(" step=") {
-        Some((value, step)) => (value.trim().to_string(), step.trim().parse::<u64>().ok()),
-        None => (right.trim().to_string(), None),
-    };
-    Some(TrainingEntry::Metric {
-        name: name.trim().to_string(),
-        value,
-        step,
-    })
 }
 
 fn format_status(status: TaskStatus) -> &'static str {
