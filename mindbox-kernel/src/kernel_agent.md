@@ -29,6 +29,20 @@ The task working directory has the following structure. Create subdirectories as
     └── tb_logs/           # Copied from workspace/tb_logs/ on completion
 ```
 
+## Dependency Installation
+
+The container has `uv` pre-installed. When a skill provides a `requirements.txt`, create a
+virtual environment in the workspace and install dependencies into it:
+
+```bash
+uv venv workspace/.venv
+source workspace/.venv/bin/activate
+uv pip install -r <path-to-requirements.txt>
+```
+
+All subsequent scripts (training, evaluation, export) must run inside this virtual environment.
+If the shell session is lost, re-activate with `source workspace/.venv/bin/activate`.
+
 ## Script Execution Rules
 
 When running training, evaluation, or data preparation scripts:

@@ -1,2 +1,3 @@
 ultralytics
 onnx
+opencv-python-headless

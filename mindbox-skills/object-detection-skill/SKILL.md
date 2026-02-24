@@ -93,16 +93,18 @@ names:
 
 ## Step 3: Install Dependencies
 
-Before training, install the required packages from the skill's `requirements.txt`:
+Install the skill's dependencies from `scripts/requirements.txt`. Follow the dependency
+installation procedure in the kernel agent documentation to create a virtual environment
+and install:
 
 ```bash
-uv pip install --system -r /home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt
+uv venv workspace/.venv
+source workspace/.venv/bin/activate
+uv pip install -r /home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt
 ```
 
 Ultralytics pulls in PyTorch and all other transitive dependencies automatically. The `onnx`
 package is needed later for export but installing it upfront avoids interrupting the pipeline.
-
-If the container already has these packages, this step is a no-op — they will be skipped.
 
 ---
 
