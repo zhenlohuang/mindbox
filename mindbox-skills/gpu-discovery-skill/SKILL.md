@@ -64,24 +64,3 @@ Read `workspace/gpu_info.json`. The schema:
   "gpus": []
 }
 ```
-
----
-
-## Step 3: Choose Configuration Based on Hardware
-
-Use the `memory_free_mb` field from the report to select model sizes and batch sizes.
-
-### VRAM Recommendation Table
-
-| Free VRAM       | Recommended Model Size | Batch Size | Notes                        |
-|-----------------|------------------------|------------|------------------------------|
-| No GPU (CPU)    | nano (n)               | 4–8        | CPU-only, expect slow training |
-| < 8 GB          | nano (n)               | 8–16       | Fits comfortably              |
-| 8–16 GB         | small (s) / medium (m) | 16–32      | Good accuracy-speed balance   |
-| 16–24 GB        | large (l)              | 32–64      | High accuracy                 |
-| > 24 GB         | xlarge (x)             | 64+        | Maximum accuracy              |
-
-### Multi-GPU
-
-When `gpu_count > 1`, pass all GPU indices as a device list to enable DDP (Distributed Data
-Parallel). Scale batch size linearly with GPU count.
