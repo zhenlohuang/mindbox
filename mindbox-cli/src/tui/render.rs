@@ -253,26 +253,12 @@ fn render_active_panel(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: 
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
-    let panel_name = if app.focused_index == 0 {
-        "kernel.log".to_string()
-    } else {
-        app.log_panels
-            .get(app.focused_index - 1)
-            .map(|panel| panel.filename.clone())
-            .unwrap_or_else(|| "Unknown".to_string())
-    };
+    let line = Line::from(format!(
+        "{} | Quit: Esc/q | Scroll: ↑/↓/PgUp/PgDn/Home/End | Expand: Ctrl+o",
+        app.connection_status
+    ));
 
-    let expand_state = if app.expand_all_results {
-        "expanded"
-    } else {
-        "truncated"
-    };
-    let text = format!(
-        "{} | Switch Panel(tab): {} | Expand(ctrl+o): {}",
-        app.connection_status, panel_name, expand_state
-    );
-
-    let widget = Paragraph::new(text).style(Style::default().fg(Color::Black).bg(Color::Gray));
+    let widget = Paragraph::new(line).style(Style::default().fg(Color::Black).bg(Color::Gray));
     frame.render_widget(widget, area);
 }
 

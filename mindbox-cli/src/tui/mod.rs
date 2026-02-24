@@ -2,7 +2,6 @@ use std::{io, time::Duration};
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -63,7 +62,7 @@ struct TerminalGuard {
 impl TerminalGuard {
     fn activate() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
         Ok(Self { active: true })
     }
 
@@ -73,7 +72,7 @@ impl TerminalGuard {
         }
 
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         self.active = false;
     }
 }
