@@ -13,6 +13,7 @@ compatibility:
   dependencies:
     - ultralytics
     - onnx
+    - opencv-python-headless
 ---
 
 # Object Detection Fine-tuning
@@ -24,7 +25,7 @@ to ONNX — which is why it's the default choice here over older YOLO versions.
 ## Workflow Overview
 
 ```
-0. Discover GPU → 1. Inspect dataset → 2. Prepare data → 3. Install deps → 4. Train → 5. Evaluate → 6. Export ONNX
+0. Discover GPU → 1. Inspect dataset → 2. Prepare data → 3. Install deps → 4. Train → 5. Evaluate → 6. Export ONNX → 7. Collect artifacts → 8. Generate summary
 ```
 
 Follow these steps in order. Each step produces outputs that feed the next.
@@ -33,35 +34,24 @@ Follow these steps in order. Each step produces outputs that feed the next.
 
 ## Step 0: Discover GPU
 
-Before anything else, detect the available hardware so later steps can make informed choices
-about model size and batch size.
-
-1. Use the `gpu-discovery` skill to detect the GPU environment. It will produce
-   `workspace/gpu_info.json` with hardware details.
-
-2. Read `workspace/gpu_info.json` to determine the hardware mode (`gpu` or `cpu`).
-
-3. Use the `memory_free_mb` value to guide model selection in Step 4:
-   - **No GPU / < 8 GB** → `yolo26n`
-   - **8–16 GB** → `yolo26s` or `yolo26m`
-   - **> 16 GB** → `yolo26l` or `yolo26x`
+Use the `gpu-discovery` skill to detect the GPU environment. It will produce
+`workspace/gpu_info.json` with hardware details. Use the `memory_free_mb` value to guide
+model selection in Step 4.
 
 ---
 
 ## Step 1: Inspect the Dataset
 
-Before writing any training code, understand what you're working with. Read the dataset directory
-structure and identify the format — this determines whether conversion is needed.
+Read the dataset directory structure and identify the format — this determines whether conversion is needed.
 
 Look for these patterns:
 - **YOLO format** (ready to use): `images/` + `labels/` directories with a `dataset.yaml`
 - **COCO format** (needs conversion): `annotations/*.json` + `images/`
 - **VOC format** (needs conversion): `Annotations/*.xml` + `JPEGImages/`
 
-Check `references/data-formats.md` for format details and conversion scripts.
+See `references/data-formats.md` for format details and conversion scripts.
 
-Also look at basic dataset health: how many images, how many classes, whether train/val splits
-exist. Unbalanced classes or missing splits will cause problems later — better to catch them now.
+Also check basic dataset health: image count, class count, whether train/val splits exist.
 
 ---
 
@@ -76,9 +66,6 @@ The script should:
 - Print dataset statistics: image count, class distribution, bounding box size distribution
 - Produce or validate a `dataset.yaml` pointing to the correct paths
 
-The `dataset.yaml` is what Ultralytics reads to find your data — getting the paths right here
-saves debugging time during training.
-
 **Example `dataset.yaml`:**
 ```yaml
 path: /mindbox/datasets/<dataset_name>
@@ -91,18 +78,12 @@ names:
 
 ---
 
-## Step 3: Install Dependencies
+## Step 3: Install deps
 
-Install the skill's dependencies from `/home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt`. Follow the dependency installation procedure in the kernel agent documentation to create a virtual environment and install:
+Install dependencies from `scripts/requirements.txt`
+following the kernel agent's dependency rules.
 
-```bash
-uv venv workspace/.venv
-source workspace/.venv/bin/activate
-uv pip install -r /home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt
-```
-
-Ultralytics pulls in PyTorch and all other transitive dependencies automatically. The `onnx`
-package is needed later for export but installing it upfront avoids interrupting the pipeline.
+Ultralytics pulls in PyTorch and all other transitive dependencies automatically.
 
 ---
 
@@ -112,9 +93,8 @@ Generate `workspace/scripts/train.py` using the Ultralytics Python API.
 
 ### Pick the right model size
 
-Read `workspace/gpu_info.json` (produced by Step 0) and use the `memory_free_mb` value to
-select the appropriate model. Smaller models train faster and are easier to deploy; larger
-models are more accurate. When the user doesn't specify, default to `yolo26n`.
+Read `workspace/gpu_info.json` (produced by Step 0) and select based on `memory_free_mb`.
+When the user doesn't specify, default to `yolo26n`.
 
 | GPU Memory | Model | Why |
 |-----------|-------|-----|
@@ -124,10 +104,25 @@ models are more accurate. When the user doesn't specify, default to `yolo26n`.
 
 See `references/model-selection.md` for detailed benchmarks.
 
+### Multi-GPU
+
+If multiple GPUs are available, pass a device list and scale `batch` linearly with GPU count:
+
+```python
+model.train(data="dataset.yaml", device=[0, 1, 2, 3], batch=64, ...)
+```
+
+Ultralytics handles DDP (Distributed Data Parallel) automatically.
+
 ### Training script structure
 
 ```python
+import os
 from ultralytics import YOLO
+
+# TensorBoard: write events to workspace/tb_logs/
+os.makedirs("tb_logs", exist_ok=True)
+os.environ["TENSORBOARD_LOGDIR"] = os.path.abspath("tb_logs")
 
 model = YOLO("yolo26n.pt")
 
@@ -140,8 +135,8 @@ results = model.train(
     project=".",
     name="train_output",
     exist_ok=True,
-    tensorboard=True,      # enables TensorBoard logging
-    patience=20,           # early stopping — avoids wasting compute on plateaus
+    tensorboard=True,
+    patience=20,
     save=True,
     save_period=10,
 )
@@ -150,28 +145,11 @@ results = model.train(
 Adjust `batch` and `imgsz` based on GPU memory. If training OOMs, halve `batch` first, then
 reduce `imgsz`. See `references/hyperparameters.md` for tuning guidance.
 
-### TensorBoard logs
-
-The Mindbox container exposes TensorBoard on port 6006 reading from `workspace/tb_logs/`.
-Set the `TENSORBOARD_LOGDIR` environment variable before training so Ultralytics writes
-events directly there:
-
-```python
-import os
-os.makedirs("tb_logs", exist_ok=True)
-os.environ["TENSORBOARD_LOGDIR"] = os.path.abspath("tb_logs")
-```
-
-Place this before `model.train(...)`. Since the script's cwd is `workspace/`, this creates
-`workspace/tb_logs/`. With `tensorboard=True`, Ultralytics will write events straight there,
-allowing the user to monitor training progress in real time.
-
 ---
 
 ## Step 5: Evaluate
 
-Training already runs validation each epoch. For a final evaluation (especially on a held-out
-test set), generate `workspace/scripts/eval.py`:
+For a final evaluation, generate `workspace/scripts/eval.py`:
 
 ```python
 from ultralytics import YOLO
@@ -187,8 +165,8 @@ report = {
     "recall": float(metrics.box.mr),
 }
 
-os.makedirs(os.path.join("..", "artifacts", "reports"), exist_ok=True)
-with open(os.path.join("..", "artifacts", "reports", "eval.json"), "w") as f:
+os.makedirs("eval_output", exist_ok=True)
+with open("eval_output/eval.json", "w") as f:
     json.dump(report, f, indent=2)
 ```
 
@@ -196,57 +174,45 @@ with open(os.path.join("..", "artifacts", "reports", "eval.json"), "w") as f:
 
 ## Step 6: Export to ONNX
 
-Generate `workspace/scripts/export.py`. YOLO's removal of DFL makes ONNX export particularly
-clean — fewer custom ops means better compatibility across inference runtimes.
-
-This step also collects all final artifacts into the `artifacts/` directory — weights, ONNX model,
-and Ultralytics' auto-generated visualizations (confusion matrix, PR curve, training curves).
+Generate `workspace/scripts/export.py`:
 
 ```python
 from ultralytics import YOLO
-import shutil, os, glob
 
-# Export ONNX
 model = YOLO("train_output/weights/best.pt")
 model.export(format="onnx", imgsz=640, simplify=True, opset=17)
-
-# Collect artifacts (artifacts/ lives under task_dir, one level up from workspace/)
-artifacts = os.path.join("..", "artifacts")
-os.makedirs(os.path.join(artifacts, "weights"), exist_ok=True)
-os.makedirs(os.path.join(artifacts, "export"), exist_ok=True)
-os.makedirs(os.path.join(artifacts, "reports"), exist_ok=True)
-
-shutil.copy2("train_output/weights/best.pt", os.path.join(artifacts, "weights", "best.pt"))
-shutil.copy2("train_output/weights/best.onnx", os.path.join(artifacts, "export", "model.onnx"))
-
-for f in glob.glob("train_output/*.png"):  # confusion_matrix.png, PR_curve.png, results.png
-    shutil.copy2(f, os.path.join(artifacts, "reports"))
-
-# Copy TensorBoard logs to artifacts
-shutil.copytree("tb_logs", os.path.join(artifacts, "tb_logs"), dirs_exist_ok=True)
 ```
 
-Use `simplify=True` to reduce the ONNX graph — this improves inference performance on most
-runtimes. Use `opset=17` for broad compatibility; lower it only if the target runtime requires it.
+Use `simplify=True` to reduce the ONNX graph. Use `opset=17` for broad compatibility.
 
 ---
 
-## Multi-GPU
+## Step 7: Collect Artifacts
 
-If multiple GPUs are available, pass a device list:
+Collect all final outputs into `artifacts/` (one level up from `workspace/`).
+Run these commands directly from `workspace/`:
 
-```python
-model.train(data="dataset.yaml", device=[0, 1, 2, 3], ...)
+```bash
+# Create directories
+mkdir -p ../artifacts/weights ../artifacts/export ../artifacts/reports
+
+# Weights
+cp workspace/train_output/weights/best.pt ../artifacts/weights/best.pt
+
+# ONNX model
+cp workspace/train_output/weights/*.onnx ../artifacts/export/model.onnx
+
+# Evaluation report
+cp workspace/eval_output/eval.json ../artifacts/reports/eval.json
+
+# Ultralytics visualizations (confusion matrix, PR curve, training curves)
+cp workspace/train_output/*.png ../artifacts/reports/
+
+# TensorBoard logs
+cp -r workspace/tb_logs ../artifacts/tb_logs
 ```
 
-Ultralytics handles DDP (Distributed Data Parallel) automatically. Scale `batch` linearly with
-GPU count (e.g., 4 GPUs → `batch=64`) to take full advantage of the parallelism.
-
----
-
-## Final Artifact Checklist
-
-Before marking the task complete, verify all outputs exist:
+After running, verify all outputs exist:
 
 ```
 artifacts/
@@ -257,9 +223,21 @@ artifacts/
 │   ├── PR_curve.png          # Precision-Recall curve
 │   └── results.png           # Training loss/metric curves
 ├── export/model.onnx         # ONNX exported model
-└── tb_logs/                   # TensorBoard logs (copied from workspace/tb_logs/)
+└── tb_logs/                  # TensorBoard logs
     └── events.out.tfevents.*
 ```
+
+---
+
+## Step 8: Generate Summary
+
+Write `summary.md` in the task working directory (`{task_dir}/summary.md`) covering:
+- **Task**: dataset name, model variant, task type (object detection)
+- **Hardware**: GPU(s) used or CPU-only
+- **Key hyperparameters**: epochs, batch size, imgsz, patience, model variant
+- **Results**: mAP50-95, mAP50, precision, recall (from `artifacts/reports/eval.json`)
+- **Artifacts produced**: list of files in `artifacts/` with their sizes
+- **Issues encountered**: any errors that required retries and how they were resolved, or "None"
 
 ---
 
@@ -267,7 +245,7 @@ artifacts/
 
 For detailed information on specific topics, read these files as needed:
 
-- `references/model-selection.md` — Full model benchmark table with parameters, mAP, and inference speed
-- `references/data-formats.md` — Data format specifications, conversion scripts, and dataset.yaml examples
-- `references/hyperparameters.md` — Hyperparameter defaults, tuning ranges, and recommendations by scenario
+- `references/model-selection.md` — Model benchmarks (parameters, mAP, inference speed)
+- `references/data-formats.md` — Data format specs, conversion scripts, dataset.yaml examples
+- `references/hyperparameters.md` — Hyperparameter defaults, tuning ranges, recommendations
 - `references/troubleshooting.md` — Common issues (OOM, convergence, small objects, export failures) and fixes

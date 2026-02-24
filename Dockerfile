@@ -9,7 +9,7 @@ COPY mindbox-kernel ./mindbox-kernel
 COPY mindbox-server ./mindbox-server
 COPY mindbox-cli ./mindbox-cli
 
-RUN cargo build --release -p mindbox-server -p mindbox-cli
+RUN cargo build --release -p mindbox-server
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
@@ -18,17 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libxcb1 \
     python3 \
     python3-pip \
     python3-venv \
     supervisor \
     nodejs \
     npm \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --break-system-packages \
@@ -39,7 +35,6 @@ RUN npm install -g @anthropic-ai/claude-code
 WORKDIR /mindbox
 
 COPY --from=builder /app/target/release/mindbox-server /mindbox/bin/mindbox-server
-COPY --from=builder /app/target/release/mindbox-cli /mindbox/bin/mindbox-cli
 COPY docker/docker-entrypoint.sh /mindbox/bin/docker-entrypoint.sh
 COPY docker/supervisord.conf /etc/supervisor/conf.d/mindbox.conf
 RUN chmod +x /mindbox/bin/docker-entrypoint.sh \

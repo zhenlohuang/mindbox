@@ -16,9 +16,9 @@ services:
       MINDBOX_PORT: "8080"
     # gpus: all
     volumes:
-      - ./mindbox-skills:/home/mindbox/.claude/skills
-      - ./data/datasets:/mindbox/datasets
-      - ./data/models:/mindbox/models
+      - ./mindbox-skills:/home/mindbox/.claude/skills:ro
+      - ./data/datasets:/mindbox/datasets:ro
+      - ./data/models:/mindbox/models:ro
       - ./data/mindbox/tasks:/mindbox/tasks
       - ./data/.claude:/home/mindbox/.claude
       - ./data/.cache:/home/mindbox/.cache
