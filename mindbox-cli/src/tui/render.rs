@@ -29,7 +29,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     let content = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(18), Constraint::Min(20)])
+        .constraints([Constraint::Length(30), Constraint::Min(20)])
         .split(outer[1]);
 
     render_sidebar(frame, content[0], app);
@@ -204,12 +204,18 @@ fn render_system_resources(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
+    let label_width = area.width.saturating_sub(4) as usize;
     let mut lines = vec![Line::from("")];
-    lines.push(sidebar_line("kernel.log", app.focused_index == 0));
+    lines.push(sidebar_line(
+        "kernel.log",
+        app.focused_index == 0,
+        label_width,
+    ));
     for (index, panel) in app.log_panels.iter().enumerate() {
         lines.push(sidebar_line(
             &panel.filename,
             app.focused_index == index + 1,
+            label_width,
         ));
     }
 
@@ -407,7 +413,7 @@ fn plain_log_lines(lines: &[String]) -> Vec<Line<'static>> {
     out
 }
 
-fn sidebar_line(label: &str, focused: bool) -> Line<'static> {
+fn sidebar_line(label: &str, focused: bool, label_width: usize) -> Line<'static> {
     let style = if focused {
         Style::default()
             .fg(Color::Yellow)
@@ -415,11 +421,33 @@ fn sidebar_line(label: &str, focused: bool) -> Line<'static> {
     } else {
         Style::default().fg(Color::White)
     };
+    let label = truncate_label(label, label_width);
 
     Line::from(vec![
         Span::styled(if focused { "> " } else { "  " }, style),
-        Span::styled(label.to_string(), style),
+        Span::styled(label, style),
     ])
+}
+
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+
+    let mut out = String::with_capacity(max_chars);
+    for ch in label.chars().take(max_chars - 1) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn push_multiline(lines: &mut Vec<Line<'static>>, text: &str, style: Style, prefix: &str) {

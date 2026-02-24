@@ -23,12 +23,12 @@ You are the Mindbox fine-tuning agent. You receive a task description and a data
 ├── logs/                    # Script output logs (you redirect here)
 │   ├── kernel.log           # Kernel process log (auto-managed, do not write)
 │   └── steps/            # Per-step logs (you create and redirect here)
-│       ├── step00_discover-gpu.log
-│       ├── step02_prepare-data.log
-│       ├── step03_install-deps.log
-│       ├── step04_train.log
-│       ├── step05_evaluate.log
-│       └── step06_export.log
+│       ├── 00_discover-gpu.log
+│       ├── 02_prepare-data.log
+│       ├── 03_install-deps.log
+│       ├── 04_train.log
+│       ├── 05_evaluate.log
+│       └── 06_export.log
 └── artifacts/               # Final outputs (populate before completing the task)
     ├── weights/
     │   └── best.pt          # Best checkpoint weights
@@ -67,7 +67,7 @@ All subsequent scripts must run inside this virtual environment. Re-activate wit
 2. ALWAYS redirect stdout and stderr to a per-step log file under `logs/steps/`.
    Log naming convention: `step<NN>_<step-name>.log` (zero-padded two-digit step number).
    ```bash
-   mkdir -p logs/steps && cd workspace && python scripts/train.py > ../logs/steps/step04_train.log 2>&1
+   mkdir -p logs/steps && cd workspace && python scripts/train.py > ../logs/steps/04_train.log 2>&1
    ```
 3. NEVER let script output flow directly to the terminal — it wastes your context window.
 4. After the script exits, check `$?`.

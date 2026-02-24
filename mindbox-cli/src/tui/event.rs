@@ -225,51 +225,39 @@ pub fn spawn_log_dir_watcher(task_id: String, tx: mpsc::Sender<AppEvent>) -> Joi
                 None => continue,
             };
 
-            let Ok(mut entries) = fs::read_dir(current_logs_dir).await else {
+            if fs::read_dir(current_logs_dir).await.is_err() {
                 logs_dir = None;
                 file_states.clear();
                 continue;
-            };
-
-            let mut files = Vec::new();
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let Some(filename) = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(ToOwned::to_owned)
-                else {
-                    continue;
-                };
-
-                if filename == "kernel.log" {
-                    continue;
-                }
-
-                let Ok(metadata) = entry.metadata().await else {
-                    continue;
-                };
-                if !metadata.is_file() {
-                    continue;
-                }
-
-                files.push((filename, path));
             }
-            files.sort_by(|left, right| left.0.cmp(&right.0));
 
-            let present_files: HashSet<&str> = files
-                .iter()
-                .map(|(filename, _)| filename.as_str())
-                .collect();
+            let mut files = collect_log_files_recursively(current_logs_dir).await;
+
+            if let Some(task_dir) = current_logs_dir.parent() {
+                let summary_path = task_dir.join("summary.md");
+                if let Ok(metadata) = fs::metadata(&summary_path).await
+                    && metadata.is_file()
+                    && files.iter().all(|file| file.key != "summary.md")
+                {
+                    files.push(WatchFile {
+                        key: "summary.md".to_string(),
+                        path: summary_path,
+                        flush_partial_on_eof: true,
+                    });
+                }
+            }
+            files.sort_by(|left, right| left.key.cmp(&right.key));
+
+            let present_files: HashSet<&str> = files.iter().map(|file| file.key.as_str()).collect();
             file_states.retain(|filename, _| present_files.contains(filename.as_str()));
 
-            for (filename, _) in &files {
-                if file_states.contains_key(filename) {
+            for file in &files {
+                if file_states.contains_key(file.key.as_str()) {
                     continue;
                 }
-                file_states.insert(filename.clone(), (0, String::new()));
+                file_states.insert(file.key.clone(), (0, String::new()));
                 if tx
-                    .send(AppEvent::LogFileDiscovered(filename.clone()))
+                    .send(AppEvent::LogFileDiscovered(file.key.clone()))
                     .await
                     .is_err()
                 {
@@ -277,15 +265,27 @@ pub fn spawn_log_dir_watcher(task_id: String, tx: mpsc::Sender<AppEvent>) -> Joi
                 }
             }
 
-            for (filename, path) in files {
+            for WatchFile {
+                key,
+                path,
+                flush_partial_on_eof,
+            } in files
+            {
                 let (mut offset, mut pending) = file_states
-                    .remove(&filename)
+                    .remove(&key)
                     .unwrap_or_else(|| (0, String::new()));
 
-                let keep_running =
-                    tail_log_file(&path, &filename, &tx, &mut offset, &mut pending).await;
+                let keep_running = tail_log_file(
+                    &path,
+                    &key,
+                    &tx,
+                    &mut offset,
+                    &mut pending,
+                    flush_partial_on_eof,
+                )
+                .await;
 
-                file_states.insert(filename, (offset, pending));
+                file_states.insert(key, (offset, pending));
                 if !keep_running {
                     return;
                 }
@@ -294,12 +294,76 @@ pub fn spawn_log_dir_watcher(task_id: String, tx: mpsc::Sender<AppEvent>) -> Joi
     })
 }
 
+#[derive(Debug)]
+struct WatchFile {
+    key: String,
+    path: PathBuf,
+    flush_partial_on_eof: bool,
+}
+
+async fn collect_log_files_recursively(logs_dir: &Path) -> Vec<WatchFile> {
+    let mut files = Vec::new();
+    let mut stack = vec![logs_dir.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            continue;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata().await else {
+                continue;
+            };
+
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !metadata.is_file() {
+                continue;
+            }
+
+            let Some(relative_key) = relative_key(logs_dir, &path) else {
+                continue;
+            };
+
+            if relative_key == "kernel.log" {
+                continue;
+            }
+
+            files.push(WatchFile {
+                key: relative_key,
+                path,
+                flush_partial_on_eof: false,
+            });
+        }
+    }
+
+    files
+}
+
+fn relative_key(root: &Path, path: &Path) -> Option<String> {
+    let relative = path
+        .strip_prefix(root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if relative.is_empty() {
+        None
+    } else {
+        Some(relative)
+    }
+}
+
 async fn tail_log_file(
     path: &Path,
     filename: &str,
     tx: &mpsc::Sender<AppEvent>,
     offset: &mut u64,
     pending: &mut String,
+    flush_partial_on_eof: bool,
 ) -> bool {
     let Ok(metadata) = fs::metadata(path).await else {
         *offset = 0;
@@ -332,6 +396,21 @@ async fn tail_log_file(
         let line = pending[..pos].trim_end_matches('\r').to_string();
         let remaining = pending[pos + 1..].to_string();
         *pending = remaining;
+        if tx
+            .send(AppEvent::LogLine {
+                filename: filename.to_string(),
+                line,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+
+    if flush_partial_on_eof && !pending.is_empty() {
+        let line = pending.trim_end_matches('\r').to_string();
+        pending.clear();
         if tx
             .send(AppEvent::LogLine {
                 filename: filename.to_string(),
