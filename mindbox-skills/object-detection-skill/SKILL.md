@@ -36,10 +36,8 @@ Follow these steps in order. Each step produces outputs that feed the next.
 Before anything else, detect the available hardware so later steps can make informed choices
 about model size and batch size.
 
-1. Run the GPU discovery script:
-```bash
-python /home/mindbox/.claude/skills/gpu-discovery-skill/scripts/detect_gpu.py
-```
+1. Use the `gpu-discovery` skill to detect the GPU environment. It will produce
+   `workspace/gpu_info.json` with hardware details.
 
 2. Read `workspace/gpu_info.json` to determine the hardware mode (`gpu` or `cpu`).
 
