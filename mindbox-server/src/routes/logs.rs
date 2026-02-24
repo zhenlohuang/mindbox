@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse},
     routing::get,
 };
-use mindbox_common::format_task_event;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -46,11 +45,9 @@ async fn get_task_logs(
                         if evt.task_id != task_filter {
                             continue;
                         }
-                        let msg = match &evt.event {
-                            mindbox_common::TaskEvent::Log { message, .. } => message.clone(),
-                            other => format_task_event(other),
-                        };
-                        yield Ok::<Event, Infallible>(Event::default().data(msg));
+                        if let Ok(msg) = serde_json::to_string(&evt.event) {
+                            yield Ok::<Event, Infallible>(Event::default().data(msg));
+                        }
                     }
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,

@@ -4,12 +4,20 @@ use serde_json::Value;
 
 use crate::tui::event::AppEvent;
 
+pub const TOOL_RESULT_PREVIEW_TAIL: usize = 10;
+
 #[derive(Debug, Clone)]
 pub enum LogEntry {
     AssistantText(String),
     Thinking(String),
-    ToolUse { name: String, summary: String },
-    ToolResult(String),
+    ToolUse {
+        name: String,
+        summary: String,
+    },
+    ToolResult {
+        content: String,
+        tool_use_id: Option<String>,
+    },
     SystemMessage(String),
     ResultMessage(String),
     Raw(String),
@@ -47,8 +55,7 @@ pub struct App {
     pub connection_status: String,
     pub should_quit: bool,
     pub stream_ended: bool,
-    pub expand_tool_results: bool,
-    pub expand_thinking: bool,
+    pub expand_all_results: bool,
     pub kernel_max_offset: usize,
 }
 
@@ -64,8 +71,7 @@ impl App {
             connection_status: "Connecting".to_string(),
             should_quit: false,
             stream_ended: false,
-            expand_tool_results: false,
-            expand_thinking: false,
+            expand_all_results: false,
             kernel_max_offset: 0,
         }
     }
@@ -108,13 +114,11 @@ impl App {
             }
             KeyCode::Char('k') => self.scroll_up(3),
             KeyCode::Char('j') => self.scroll_down(3),
-            KeyCode::Char('o') => {
-                self.expand_tool_results = !self.expand_tool_results;
-                self.refresh_kernel_scroll_after_view_change();
-            }
-            KeyCode::Char('t') => {
-                self.expand_thinking = !self.expand_thinking;
-                self.refresh_kernel_scroll_after_view_change();
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.expand_all_results = !self.expand_all_results;
+                if self.kernel_scroll.auto_scroll {
+                    self.kernel_scroll.offset = self.kernel_total_lines();
+                }
             }
             KeyCode::Tab => {
                 self.focused_index = (self.focused_index + 1) % self.panel_count();
@@ -178,12 +182,6 @@ impl App {
             self.kernel_max_offset = max_offset;
         } else if let Some(panel) = self.log_panels.get_mut(panel_index - 1) {
             panel.max_offset = max_offset;
-        }
-    }
-
-    fn refresh_kernel_scroll_after_view_change(&mut self) {
-        if self.kernel_scroll.auto_scroll {
-            self.kernel_scroll.offset = self.kernel_total_lines();
         }
     }
 
@@ -288,7 +286,21 @@ impl App {
     }
 
     fn push_kernel(&mut self, entry: LogEntry) {
-        self.kernel_logs.push(entry);
+        if let LogEntry::ToolResult {
+            tool_use_id: Some(new_id),
+            ..
+        } = &entry
+            && let Some(LogEntry::ToolResult {
+                tool_use_id: Some(prev_id),
+                ..
+            }) = self.kernel_logs.last()
+            && prev_id == new_id
+        {
+            let last = self.kernel_logs.len() - 1;
+            self.kernel_logs[last] = entry;
+        } else {
+            self.kernel_logs.push(entry);
+        }
         if self.kernel_scroll.auto_scroll {
             self.kernel_scroll.offset = self.kernel_total_lines();
         }
@@ -297,11 +309,10 @@ impl App {
     pub fn kernel_total_lines(&self) -> usize {
         let mut total = 0;
         for (i, entry) in self.kernel_logs.iter().enumerate() {
-            // Separator blank line between different entry types
             if i > 0 {
                 let prev = &self.kernel_logs[i - 1];
                 let tool_pair_contiguous = matches!(prev, LogEntry::ToolUse { .. })
-                    && matches!(entry, LogEntry::ToolResult(_));
+                    && matches!(entry, LogEntry::ToolResult { .. });
                 if !tool_pair_contiguous {
                     total += 1;
                 }
@@ -309,26 +320,21 @@ impl App {
             match entry {
                 LogEntry::AssistantText(text) => total += text.lines().count().max(1),
                 LogEntry::Thinking(text) => {
-                    // "Thinking:" header line is always rendered.
                     total += 1;
-                    if self.expand_thinking {
-                        total += text.lines().count().max(1);
-                    } else {
-                        // Collapsed hint line: "(N lines) [collapsed]".
-                        total += 1;
-                    }
+                    total += text.lines().count().max(1);
                 }
                 LogEntry::ToolUse { summary, .. } => {
-                    // header + summary (if non-empty)
                     total += 1;
                     if !summary.is_empty() {
                         total += 1;
                     }
                 }
-                LogEntry::ToolResult(text) => {
-                    total += 1;
-                    if self.expand_tool_results {
-                        total += text.lines().count().max(1);
+                LogEntry::ToolResult { content, .. } => {
+                    let line_count = content.lines().count().max(1);
+                    if self.expand_all_results || line_count <= TOOL_RESULT_PREVIEW_TAIL {
+                        total += line_count;
+                    } else {
+                        total += 1 + TOOL_RESULT_PREVIEW_TAIL;
                     }
                 }
                 LogEntry::SystemMessage(_) => total += 1,
@@ -443,7 +449,17 @@ fn parse_claude_log_entries(line: &str) -> Vec<LogEntry> {
                 .or_else(|| value.get("message"))
                 .map(format_value)
                 .or_else(|| extract_textish(Some(&value)));
-            content.map(LogEntry::ToolResult).into_iter().collect()
+            let tool_use_id = value
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            content
+                .map(|content| LogEntry::ToolResult {
+                    content,
+                    tool_use_id,
+                })
+                .into_iter()
+                .collect()
         }
         "system" => {
             let message = extract_textish(
@@ -535,6 +551,10 @@ fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
 fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
     let mut out = Vec::new();
     let mut has_tool_result = false;
+    let is_synthetic = value
+        .get("isSynthetic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
         for block in content {
@@ -551,14 +571,24 @@ fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
                         .and_then(|t| normalize_multiline_text(&t))
                     {
                         has_tool_result = true;
-                        out.push(LogEntry::ToolResult(text));
+                        out.push(LogEntry::ToolResult {
+                            content: text,
+                            tool_use_id: block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned),
+                        });
                     }
                 }
                 "text" => {
                     if let Some(text) =
                         extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
                     {
-                        out.push(LogEntry::SystemMessage(format!("[user] {text}")));
+                        if is_synthetic {
+                            out.push(LogEntry::Raw(summarize_synthetic_user_text(&text)));
+                        } else {
+                            out.push(LogEntry::SystemMessage(format!("[user] {text}")));
+                        }
                     }
                 }
                 _ => {}
@@ -572,37 +602,67 @@ fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
             normalize_multiline_text(&t)
         })
     {
-        out.push(LogEntry::ToolResult(text));
+        out.push(LogEntry::ToolResult {
+            content: text,
+            tool_use_id: extract_user_tool_use_id(value),
+        });
     }
 
     out
 }
 
+fn extract_user_tool_use_id(value: &Value) -> Option<String> {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+        })
+}
+
 fn extract_tool_use_result_text(value: &Value) -> Option<String> {
-    let stdout = value
-        .pointer("/tool_use_result/stdout")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let stderr = value
-        .pointer("/tool_use_result/stderr")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    let mut merged = String::new();
-    if !stdout.trim().is_empty() {
-        merged.push_str(stdout.trim());
-    }
-    if !stderr.trim().is_empty() {
-        if !merged.is_empty() {
-            merged.push('\n');
+    let tool_use_result = value.get("tool_use_result")?;
+    match tool_use_result {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         }
-        merged.push_str(stderr.trim());
-    }
+        Value::Object(map) => {
+            let stdout = map
+                .get("stdout")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let stderr = map
+                .get("stderr")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
 
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged)
+            let mut merged = String::new();
+            if !stdout.trim().is_empty() {
+                merged.push_str(stdout.trim());
+            }
+            if !stderr.trim().is_empty() {
+                if !merged.is_empty() {
+                    merged.push('\n');
+                }
+                merged.push_str(stderr.trim());
+            }
+
+            if !merged.is_empty() {
+                Some(merged)
+            } else {
+                extract_textish(Some(tool_use_result))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -623,6 +683,10 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
         .get("subtype")
         .and_then(Value::as_str)
         .unwrap_or_default();
+
+    if event_type.eq_ignore_ascii_case("user") {
+        return Some(user_fallback_entry(&value, subtype));
+    }
 
     let mut summary = if subtype.is_empty() {
         format!("[json] type={event_type}")
@@ -648,6 +712,72 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
     }
 
     Some(LogEntry::SystemMessage(summary))
+}
+
+fn user_fallback_entry(value: &Value, subtype: &str) -> LogEntry {
+    let is_synthetic = value
+        .get("isSynthetic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_synthetic
+        && let Some(text) = value
+            .pointer("/message/content")
+            .and_then(|v| extract_textish(Some(v)))
+            .and_then(|v| normalize_multiline_text(&v))
+    {
+        return LogEntry::Raw(summarize_synthetic_user_text(&text));
+    }
+
+    let detail = extract_textish(
+        value
+            .get("message")
+            .or_else(|| value.get("content"))
+            .or_else(|| value.get("result"))
+            .or_else(|| value.get("error"))
+            .or_else(|| value.get("detail"))
+            .or_else(|| value.pointer("/tool_use_result/stdout"))
+            .or_else(|| value.pointer("/tool_use_result/stderr")),
+    )
+    .and_then(|text| normalize_multiline_text(&text))
+    .map(|text| truncate_text(&sanitize_line_for_display(&text), 180));
+
+    let summary = if let Some(text) = detail {
+        if subtype.is_empty() {
+            format!("[user] {text}")
+        } else {
+            format!("[user:{subtype}] {text}")
+        }
+    } else if subtype.is_empty() {
+        "[user] structured message".to_string()
+    } else {
+        format!("[user] subtype={subtype}")
+    };
+
+    LogEntry::Raw(summary)
+}
+
+fn summarize_synthetic_user_text(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+
+    if let Some(path) = first_line.strip_prefix("Base directory for this skill: ") {
+        let skill = path
+            .trim()
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("skill");
+        return format!("[skill] {skill} instructions injected");
+    }
+
+    if first_line.is_empty() {
+        "[skill] synthetic context injected".to_string()
+    } else {
+        format!("[skill] {}", truncate_text(first_line, 120))
+    }
 }
 
 fn format_status(status: TaskStatus) -> &'static str {
@@ -820,7 +950,13 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         match &entries[0] {
-            LogEntry::ToolResult(content) => assert_eq!(content, "done"),
+            LogEntry::ToolResult {
+                content,
+                tool_use_id,
+            } => {
+                assert_eq!(content, "done");
+                assert!(tool_use_id.is_none());
+            }
             other => panic!("unexpected entry: {other:?}"),
         };
     }
@@ -835,5 +971,65 @@ mod tests {
             LogEntry::Thinking(content) => assert_eq!(content, "plan first"),
             other => panic!("unexpected entry: {other:?}"),
         };
+    }
+
+    #[test]
+    fn user_json_fallback_is_summarized() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(r#"{"type":"user","subtype":"noop"}"#.to_string());
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::Raw(line) => assert_eq!(line, "[user] subtype=noop"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthetic_user_text_is_summarized() {
+        let line = r#"{"type":"user","isSynthetic":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /home/mindbox/.claude/skills/gpu-discovery-skill\n\n# GPU Discovery"}]}}"#;
+        let entries = parse_claude_log_entries(line);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            LogEntry::Raw(line) => {
+                assert_eq!(line, "[skill] gpu-discovery-skill instructions injected")
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_tool_result_string_is_supported() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[]},"tool_use_result":"Error: Exit code 2"}"#;
+        let entries = parse_claude_log_entries(line);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            LogEntry::ToolResult { content, .. } => assert_eq!(content, "Error: Exit code 2"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_tool_result_with_same_tool_use_id_updates_in_place() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"line 1"}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"line 1\nline 2"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::ToolResult {
+                content,
+                tool_use_id,
+            } => {
+                assert_eq!(content, "line 1\nline 2");
+                assert_eq!(tool_use_id.as_deref(), Some("tool-1"));
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
     }
 }

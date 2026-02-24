@@ -93,9 +93,7 @@ names:
 
 ## Step 3: Install Dependencies
 
-Install the skill's dependencies from `scripts/requirements.txt`. Follow the dependency
-installation procedure in the kernel agent documentation to create a virtual environment
-and install:
+Install the skill's dependencies from `/home/mindbox/.claude/skills/object-detection-skill/scripts/requirements.txt`. Follow the dependency installation procedure in the kernel agent documentation to create a virtual environment and install:
 
 ```bash
 uv venv workspace/.venv

@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{TaskEvent, TaskStatus};
 
-pub fn format_stream_event(json_line: &str) -> String {
+fn format_stream_event(json_line: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(json_line) else {
         return json_line.to_string();
     };
@@ -43,28 +43,24 @@ pub fn format_stream_event(json_line: &str) -> String {
     }
 }
 
-pub fn format_task_event(event: &TaskEvent) -> String {
-    match event {
-        TaskEvent::StatusUpdate {
-            status, message, ..
-        } => {
-            format!("[status: {}] {message}", format_status(*status))
-        }
-        TaskEvent::Metric { metric, .. } => {
-            let step = metric
-                .step
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".to_string());
-            format!("[metric] {}={} step={step}", metric.name, metric.value)
-        }
-        TaskEvent::Error { message, .. } => format!("[error] {message}"),
-        TaskEvent::Log { message, .. } => format_stream_event(message),
-    }
-}
-
 pub fn format_log_line(line: &str) -> String {
     if let Ok(event) = serde_json::from_str::<TaskEvent>(line) {
-        return format_task_event(&event);
+        return match event {
+            TaskEvent::StatusUpdate {
+                status, message, ..
+            } => {
+                format!("[status: {}] {message}", format_status(status))
+            }
+            TaskEvent::Metric { metric, .. } => {
+                let step = metric
+                    .step
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                format!("[metric] {}={} step={step}", metric.name, metric.value)
+            }
+            TaskEvent::Error { message, .. } => format!("[error] {message}"),
+            TaskEvent::Log { message, .. } => format_stream_event(&message),
+        };
     }
     format_stream_event(line)
 }

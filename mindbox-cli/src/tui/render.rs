@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::tui::app::{App, LogEntry};
+use crate::tui::app::{App, LogEntry, TOOL_RESULT_PREVIEW_TAIL};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let outer = Layout::default()
@@ -114,11 +114,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App)
 fn render_active_panel(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &mut App) {
     let (lines, offset, auto_scroll) = match app.focused_index {
         0 => (
-            kernel_lines(
-                &app.kernel_logs,
-                app.expand_thinking,
-                app.expand_tool_results,
-            ),
+            kernel_lines(&app.kernel_logs, app.expand_all_results),
             app.kernel_scroll.offset,
             app.kernel_scroll.auto_scroll,
         ),
@@ -160,27 +156,15 @@ fn render_status_bar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &A
             .unwrap_or_else(|| "Unknown".to_string())
     };
 
-    let text = if app.focused_index == 0 {
-        let thinking_state = if app.expand_thinking {
-            "expanded".to_string()
-        } else {
-            "collapsed".to_string()
-        };
-        let tool_use_state = if app.expand_tool_results {
-            "expanded".to_string()
-        } else {
-            "collapsed".to_string()
-        };
-        format!(
-            "{} | Switch Panel(tab): {} | Thinking(t): {} | Tool Use(o): {}",
-            app.connection_status, panel_name, thinking_state, tool_use_state
-        )
+    let expand_state = if app.expand_all_results {
+        "expanded"
     } else {
-        format!(
-            "{} | Switch Panel(tab): {}",
-            app.connection_status, panel_name
-        )
+        "truncated"
     };
+    let text = format!(
+        "{} | Switch Panel(tab): {} | Expand(ctrl+o): {}",
+        app.connection_status, panel_name, expand_state
+    );
 
     let widget = Paragraph::new(text).style(Style::default().fg(Color::Black).bg(Color::Gray));
     frame.render_widget(widget, area);
@@ -197,11 +181,7 @@ fn effective_scroll(offset: usize, auto_scroll: bool, total_lines: usize, height
     selected.min(u16::MAX as usize) as u16
 }
 
-fn kernel_lines(
-    entries: &[LogEntry],
-    expand_thinking: bool,
-    expand_tool_results: bool,
-) -> Vec<Line<'static>> {
+fn kernel_lines(entries: &[LogEntry], expand_all_results: bool) -> Vec<Line<'static>> {
     let dim_style = Style::default().fg(Color::DarkGray);
 
     let mut out = Vec::new();
@@ -209,7 +189,7 @@ fn kernel_lines(
         if i > 0 {
             let prev = &entries[i - 1];
             let tool_pair_contiguous = matches!(prev, LogEntry::ToolUse { .. })
-                && matches!(entry, LogEntry::ToolResult(_));
+                && matches!(entry, LogEntry::ToolResult { .. });
             if !tool_pair_contiguous {
                 out.push(Line::from(""));
             }
@@ -220,23 +200,13 @@ fn kernel_lines(
                 push_multiline(&mut out, text, Style::default().fg(Color::White), "");
             }
             LogEntry::Thinking(text) => {
-                let line_count = text.lines().count().max(1);
                 out.push(Line::from(vec![Span::styled(
                     "Thinking:",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                if expand_thinking {
-                    push_multiline(&mut out, text, Style::default().fg(Color::DarkGray), "  ");
-                } else {
-                    out.push(Line::from(vec![Span::styled(
-                        format!("  ({line_count} lines) [collapsed]"),
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::DIM),
-                    )]));
-                }
+                push_multiline(&mut out, text, Style::default().fg(Color::DarkGray), "  ");
             }
             LogEntry::ToolUse { name, summary, .. } => {
                 out.push(Line::from(vec![Span::styled(
@@ -252,39 +222,32 @@ fn kernel_lines(
                     )]));
                 }
             }
-            LogEntry::ToolResult(content) => {
-                let is_error = content.starts_with("Error")
-                    || content.starts_with("error")
-                    || content.starts_with("ERROR");
-                let line_count = content.lines().count().max(1);
+            LogEntry::ToolResult { content, .. } => {
+                let lower = content.trim_start().to_ascii_lowercase();
+                let is_error = lower.starts_with("error") || lower.contains("error:");
                 let attached_to_tool_use =
                     i > 0 && matches!(entries[i - 1], LogEntry::ToolUse { .. });
-                let header_prefix = if attached_to_tool_use { "  " } else { "" };
+                let first_prefix = if attached_to_tool_use {
+                    "  ⎿ "
+                } else {
+                    "⎿ "
+                };
                 let body_prefix = if attached_to_tool_use { "    " } else { "  " };
+                let style = if is_error {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::DIM)
+                };
 
-                if !expand_tool_results {
-                    let label = if is_error {
-                        format!("{header_prefix}❌ ({line_count} lines) [collapsed]")
-                    } else {
-                        format!("{header_prefix}({line_count} lines) [collapsed]")
-                    };
-                    let style = if is_error {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
-                    } else {
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::DIM)
-                    };
-                    out.push(Line::from(vec![Span::styled(label, style)]));
-                } else if is_error {
+                let visible_lines = tool_result_visible_lines(content, expand_all_results);
+                for (idx, line) in visible_lines.iter().enumerate() {
+                    let prefix = if idx == 0 { first_prefix } else { body_prefix };
                     out.push(Line::from(vec![Span::styled(
-                        format!("{header_prefix}❌"),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                        format!("{prefix}{line}"),
+                        style,
                     )]));
-                }
-
-                if expand_tool_results {
-                    push_multiline(&mut out, content, dim_style, body_prefix);
                 }
             }
             LogEntry::SystemMessage(message) => {
@@ -299,6 +262,12 @@ fn kernel_lines(
                 ]));
             }
             LogEntry::ResultMessage(message) => {
+                out.push(Line::from(vec![Span::styled(
+                    "━━━ Result ━━━",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 push_multiline(&mut out, message, Style::default().fg(Color::White), "");
             }
             LogEntry::Raw(line) => {
@@ -309,6 +278,29 @@ fn kernel_lines(
     if out.is_empty() {
         out.push(Line::from("Waiting for kernel output..."));
     }
+    out
+}
+
+fn tool_result_visible_lines(content: &str, expand_all_results: bool) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return vec![String::new()];
+    }
+
+    let total = lines.len();
+    if expand_all_results || total <= TOOL_RESULT_PREVIEW_TAIL {
+        return lines.into_iter().map(ToOwned::to_owned).collect();
+    }
+
+    let omitted = total - TOOL_RESULT_PREVIEW_TAIL;
+    let mut out = Vec::with_capacity(1 + TOOL_RESULT_PREVIEW_TAIL);
+    out.push(format!("... (省略前 {omitted} 行，ctrl+o 展开)"));
+    out.extend(
+        lines
+            .iter()
+            .skip(total - TOOL_RESULT_PREVIEW_TAIL)
+            .map(|line| (*line).to_string()),
+    );
     out
 }
 

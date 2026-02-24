@@ -354,12 +354,15 @@ pub async fn resolve_logs_dir(task_id: &str) -> Option<PathBuf> {
 }
 
 fn is_terminal_message(message: &str) -> bool {
-    let text = message.trim().to_ascii_lowercase();
-    matches!(
-        text.as_str(),
-        "task completed" | "task failed" | "task cancelled" | "task canceled"
-    ) || text.starts_with("[status: completed]")
-        || text.starts_with("[status: failed]")
-        || text.starts_with("[status: cancelled]")
-        || text.starts_with("[status: canceled]")
+    if let Ok(event) = serde_json::from_str::<mindbox_common::TaskEvent>(message)
+        && let mindbox_common::TaskEvent::StatusUpdate { status, .. } = event
+    {
+        return matches!(
+            status,
+            mindbox_common::TaskStatus::Completed
+                | mindbox_common::TaskStatus::Failed
+                | mindbox_common::TaskStatus::Cancelled
+        );
+    }
+    false
 }
