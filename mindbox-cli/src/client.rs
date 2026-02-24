@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use mindbox_common::{CancelTaskResponse, CreateTaskRequest, GetTaskResponse, ListTasksResponse};
+use mindbox_common::{
+    CancelTaskResponse, CreateTaskRequest, GetTaskResponse, ListTasksResponse, SystemResources,
+};
 
 #[derive(Clone)]
 pub struct MindboxClient {
@@ -74,5 +76,16 @@ impl MindboxClient {
             .json::<GetTaskResponse>()
             .await
             .context("parse get_task response")
+    }
+
+    pub async fn get_system_resources(&self) -> Result<SystemResources> {
+        self.http
+            .get(format!("{}/api/v1/system/resources", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<SystemResources>()
+            .await
+            .context("parse get_system_resources response")
     }
 }

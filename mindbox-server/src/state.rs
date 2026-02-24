@@ -4,7 +4,7 @@ use mindbox_common::{MindboxConfig, TaskEvent};
 use mindbox_kernel::Kernel;
 use tokio::sync::broadcast;
 
-use crate::services::task_lock::TaskLockService;
+use crate::services::{system_monitor::SystemMonitorService, task_lock::TaskLockService};
 
 #[derive(Debug, Clone)]
 pub struct BroadcastEvent {
@@ -17,6 +17,7 @@ pub struct AppState {
     pub config: Arc<MindboxConfig>,
     pub kernel: Arc<dyn Kernel>,
     pub task_lock: Arc<TaskLockService>,
+    pub system_monitor: Arc<SystemMonitorService>,
     pub event_tx: broadcast::Sender<BroadcastEvent>,
 }
 
@@ -25,12 +26,14 @@ impl AppState {
         config: Arc<MindboxConfig>,
         kernel: Arc<dyn Kernel>,
         task_lock: Arc<TaskLockService>,
+        system_monitor: Arc<SystemMonitorService>,
         event_tx: broadcast::Sender<BroadcastEvent>,
     ) -> Self {
         Self {
             config,
             kernel,
             task_lock,
+            system_monitor,
             event_tx,
         }
     }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use mindbox_common::MindboxConfig;
 use mindbox_kernel::create_kernel;
-use services::task_lock::TaskLockService;
+use services::{system_monitor::SystemMonitorService, task_lock::TaskLockService};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -26,13 +26,14 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(MindboxConfig::from_env()?);
     let kernel = create_kernel(&config);
     let task_lock = Arc::new(TaskLockService::new());
+    let system_monitor = Arc::new(SystemMonitorService::new());
     let (event_tx, _) = broadcast::channel(2048);
 
     tokio::fs::create_dir_all(config.tasks_dir()).await?;
     tokio::fs::create_dir_all(config.datasets_dir()).await?;
     tokio::fs::create_dir_all(config.models_dir()).await?;
 
-    let state = AppState::new(config.clone(), kernel, task_lock, event_tx);
+    let state = AppState::new(config.clone(), kernel, task_lock, system_monitor, event_tx);
     let app = create_router(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());

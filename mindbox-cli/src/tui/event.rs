@@ -6,7 +6,7 @@ use std::{
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEventKind};
 use futures::StreamExt;
-use mindbox_common::{Task, TaskEvent};
+use mindbox_common::{SystemResources, Task, TaskEvent};
 use reqwest_eventsource::{Event, EventSource};
 use tokio::{
     fs::{self, File},
@@ -32,6 +32,7 @@ pub enum AppEvent {
     ScrollUp,
     ScrollDown,
     Tick,
+    SystemResources(Box<SystemResources>),
 }
 
 pub fn spawn_terminal_events(tx: mpsc::Sender<AppEvent>) -> JoinHandle<()> {
@@ -142,6 +143,40 @@ pub fn spawn_task_poller(
                     if tx
                         .send(AppEvent::RawLog(format!(
                             "[error] failed to poll task info: {err}"
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_resource_poller(client: MindboxClient, tx: mpsc::Sender<AppEvent>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut poll_interval = time::interval(Duration::from_secs(2));
+        poll_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+        loop {
+            poll_interval.tick().await;
+
+            match client.get_system_resources().await {
+                Ok(resources) => {
+                    if tx
+                        .send(AppEvent::SystemResources(Box::new(resources)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if tx
+                        .send(AppEvent::RawLog(format!(
+                            "[error] failed to poll system resources: {err}"
                         )))
                         .await
                         .is_err()

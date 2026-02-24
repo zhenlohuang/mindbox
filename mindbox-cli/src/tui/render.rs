@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -19,7 +19,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    render_task_info(frame, outer[0], app);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(outer[0]);
+
+    render_task_info(frame, top[0], app);
+    render_system_resources(frame, top[1], app);
 
     let content = Layout::default()
         .direction(Direction::Horizontal)
@@ -95,6 +101,106 @@ fn render_task_info(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &Ap
     let widget =
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Task Info"));
     frame.render_widget(widget, area);
+}
+
+fn render_system_resources(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("System Resources");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let Some(resources) = app.system_resources.as_ref() else {
+        frame.render_widget(Paragraph::new("Waiting for data..."), inner);
+        return;
+    };
+
+    let mut metrics = Vec::new();
+    metrics.push((
+        "CPU".to_string(),
+        resources.cpu.utilization_percent,
+        format!("{:.1}%", resources.cpu.utilization_percent),
+    ));
+    metrics.push((
+        "MEM".to_string(),
+        resources.memory.utilization_percent,
+        format!(
+            "{:.1}G/{:.1}G",
+            bytes_to_gib(resources.memory.used_bytes),
+            bytes_to_gib(resources.memory.total_bytes),
+        ),
+    ));
+
+    let multi_gpu = resources.gpus.len() > 1;
+    for (index, gpu) in resources.gpus.iter().enumerate() {
+        let gpu_util_label = if multi_gpu {
+            format!("GPU{index} UTIL")
+        } else {
+            "GPU UTIL".to_string()
+        };
+        let gpu_mem_label = if multi_gpu {
+            format!("GPU{index} MEM")
+        } else {
+            "GPU MEM".to_string()
+        };
+
+        metrics.push((
+            gpu_util_label,
+            gpu.utilization_percent,
+            format!("{:.1}%", gpu.utilization_percent),
+        ));
+        metrics.push((
+            gpu_mem_label,
+            gpu.memory_utilization_percent,
+            format!(
+                "{:.1}G/{:.1}G",
+                bytes_to_gib(gpu.memory_used_bytes),
+                bytes_to_gib(gpu.memory_total_bytes),
+            ),
+        ));
+    }
+
+    let visible_count = metrics.len().min(inner.height as usize);
+    if visible_count == 0 {
+        return;
+    }
+    let label_width = metrics
+        .iter()
+        .take(visible_count)
+        .map(|(label, _, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+
+    let top_padding = ((inner.height as usize).saturating_sub(visible_count) / 2) as u16;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                vec![Constraint::Length(top_padding)],
+                vec![Constraint::Length(1); visible_count],
+                vec![Constraint::Min(0)],
+            ]
+            .concat(),
+        )
+        .split(inner);
+
+    for (area, (label, percent, value)) in rows
+        .iter()
+        .skip(1)
+        .take(visible_count)
+        .zip(metrics.into_iter().take(visible_count))
+    {
+        if area.height == 0 {
+            continue;
+        }
+
+        render_meter_line(frame, *area, &label, percent, &value, label_width);
+    }
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
@@ -364,4 +470,82 @@ fn visual_line_count(lines: &[Line<'_>], content_width: usize) -> usize {
 
 fn panel_border_style() -> Style {
     Style::default().fg(Color::Yellow)
+}
+
+fn usage_color(percent: f32) -> Color {
+    if percent < 60.0 {
+        Color::Green
+    } else if percent <= 85.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+fn bytes_to_gib(bytes: u64) -> f64 {
+    bytes as f64 / 1024_f64.powi(3)
+}
+
+fn render_meter_line(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    percent: f32,
+    value: &str,
+    label_width: usize,
+) {
+    let percent = percent.clamp(0.0, 100.0);
+    let label_text = format!("{label:<label_width$}");
+    let value_text = value.to_string();
+
+    let total_width = area.width as usize;
+    if total_width == 0 {
+        return;
+    }
+
+    let reserved = label_text.chars().count() + 3;
+    if total_width <= reserved {
+        let fallback = Paragraph::new(label_text);
+        frame.render_widget(fallback, area);
+        return;
+    }
+
+    let content_width = total_width - reserved;
+    let value_len = value_text.chars().count();
+    if content_width <= value_len {
+        let fallback = Paragraph::new(format!("{label_text} [{value_text}]"));
+        frame.render_widget(fallback, area);
+        return;
+    }
+
+    let gauge_width = content_width.saturating_sub(value_len);
+    let filled = ((gauge_width as f32) * (percent / 100.0))
+        .round()
+        .clamp(0.0, gauge_width as f32) as usize;
+    let empty = gauge_width.saturating_sub(filled);
+
+    let line = Line::from(vec![
+        Span::styled(
+            label_text,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ["),
+        Span::styled(
+            "|".repeat(filled),
+            Style::default()
+                .fg(usage_color(percent))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            value_text,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("]"),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }

@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod logs;
 pub mod status;
+pub mod system;
 pub mod tasks;
 
 use axum::Router;
@@ -13,5 +14,6 @@ pub fn create_router(state: AppState) -> Router {
         .merge(logs::router())
         .merge(artifacts::router())
         .merge(status::router())
+        .merge(system::router())
         .with_state(state)
 }

@@ -21,3 +21,5 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+sysinfo.workspace = true
+nvml-wrapper.workspace = true

@@ -144,6 +144,34 @@ pub struct StatusResponse {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemResources {
+    pub cpu: CpuInfo,
+    pub memory: MemoryInfo,
+    pub gpus: Vec<GpuInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuInfo {
+    pub utilization_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInfo {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub utilization_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub utilization_percent: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub memory_utilization_percent: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

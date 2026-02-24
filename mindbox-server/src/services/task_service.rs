@@ -426,6 +426,7 @@ mod tests {
             config,
             Arc::new(mindbox_kernel::codex::CodexKernel::new()),
             Arc::new(crate::services::task_lock::TaskLockService::new()),
+            Arc::new(crate::services::system_monitor::SystemMonitorService::new()),
             tokio::sync::broadcast::channel(16).0,
         );
         let service = TaskService::new(state);

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use mindbox_common::{Task, TaskEvent, TaskStatus};
+use mindbox_common::{SystemResources, Task, TaskEvent, TaskStatus};
 use serde_json::Value;
 
 use crate::tui::event::AppEvent;
@@ -48,6 +48,7 @@ pub struct LogPanel {
 pub struct App {
     pub task_id: String,
     pub task: Option<Task>,
+    pub system_resources: Option<SystemResources>,
     pub kernel_logs: Vec<LogEntry>,
     pub log_panels: Vec<LogPanel>,
     pub focused_index: usize,
@@ -64,6 +65,7 @@ impl App {
         Self {
             task_id,
             task: None,
+            system_resources: None,
             kernel_logs: Vec::new(),
             log_panels: Vec::new(),
             focused_index: 0,
@@ -99,6 +101,7 @@ impl App {
                 let _ = self.find_or_create_panel(&filename);
             }
             AppEvent::Tick => {}
+            AppEvent::SystemResources(resources) => self.system_resources = Some(*resources),
         }
     }
 

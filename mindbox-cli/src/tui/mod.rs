@@ -17,8 +17,8 @@ mod render;
 
 use app::App;
 use event::{
-    AppEvent, spawn_log_dir_watcher, spawn_sse_reader, spawn_task_poller, spawn_terminal_events,
-    spawn_tick,
+    AppEvent, spawn_log_dir_watcher, spawn_resource_poller, spawn_sse_reader, spawn_task_poller,
+    spawn_terminal_events, spawn_tick,
 };
 
 pub async fn run(client: &MindboxClient, task_id: &str) -> Result<()> {
@@ -30,11 +30,13 @@ pub async fn run(client: &MindboxClient, task_id: &str) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
     let client_for_sse = client.clone();
     let client_for_poller = client.clone();
+    let client_for_resources = client.clone();
     let task_id_owned = task_id.to_string();
 
     spawn_terminal_events(tx.clone());
     spawn_sse_reader(client_for_sse, task_id_owned.clone(), tx.clone());
     spawn_task_poller(client_for_poller, task_id_owned.clone(), tx.clone());
+    spawn_resource_poller(client_for_resources, tx.clone());
     spawn_log_dir_watcher(task_id_owned.clone(), tx.clone());
     spawn_tick(tx, Duration::from_millis(200));
 
