@@ -114,6 +114,14 @@ model.train(data="dataset.yaml", device=[0, 1, 2, 3], batch=64, ...)
 
 Ultralytics handles DDP (Distributed Data Parallel) automatically.
 
+### Enable TensorBoard in Ultralytics
+
+Before running training, enable TensorBoard in YOLO settings:
+
+```bash
+yolo settings tensorboard=True
+```
+
 ### Training script structure
 
 ```python
@@ -135,7 +143,6 @@ results = model.train(
     project=".",
     name="train_output",
     exist_ok=True,
-    tensorboard=True,
     patience=20,
     save=True,
     save_period=10,

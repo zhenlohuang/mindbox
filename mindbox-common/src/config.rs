@@ -14,12 +14,9 @@ pub struct MindboxConfig {
 impl MindboxConfig {
     pub fn from_env() -> Result<Self> {
         let kernel = env::var("MINDBOX_KERNEL").unwrap_or_else(|_| "claude-code".to_string());
-        let data_root = env::var("MINDBOX_DATA_ROOT")
-            .or_else(|_| env::var("DATA_ROOT"))
-            .unwrap_or_else(|_| "./runtime".to_string());
+        let data_root = env::var("MINDBOX_DATA_ROOT").unwrap_or_else(|_| "/mindbox".to_string());
 
         let port = env::var("MINDBOX_PORT")
-            .or_else(|_| env::var("PORT"))
             .unwrap_or_else(|_| "8080".to_string())
             .parse::<u16>()
             .map_err(|e| MindboxError::Config(format!("invalid PORT: {e}")))?;

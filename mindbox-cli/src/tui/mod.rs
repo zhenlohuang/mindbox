@@ -37,17 +37,43 @@ pub async fn run(client: &MindboxClient, task_id: &str) -> Result<()> {
     spawn_task_poller(client_for_poller, task_id_owned.clone(), tx.clone());
     spawn_resource_poller(client_for_resources, tx.clone());
     spawn_log_dir_watcher(task_id_owned.clone(), tx.clone());
-    spawn_tick(tx, Duration::from_millis(200));
+    spawn_tick(tx, Duration::from_millis(33));
 
     let mut app = App::new(task_id_owned);
     terminal.draw(|frame| render::draw(frame, &mut app))?;
+    let mut pending_redraw = false;
 
     while let Some(event) = rx.recv().await {
+        let immediate_redraw = matches!(
+            event,
+            AppEvent::Key(_)
+                | AppEvent::Resize(_, _)
+                | AppEvent::ScrollUp
+                | AppEvent::ScrollDown
+                | AppEvent::StreamConnected
+                | AppEvent::StreamEnded
+        );
+        let is_tick = matches!(event, AppEvent::Tick);
         app.handle(event);
-        terminal.draw(|frame| render::draw(frame, &mut app))?;
         if app.should_quit {
             break;
         }
+
+        if immediate_redraw {
+            terminal.draw(|frame| render::draw(frame, &mut app))?;
+            pending_redraw = false;
+            continue;
+        }
+
+        if is_tick {
+            if pending_redraw {
+                terminal.draw(|frame| render::draw(frame, &mut app))?;
+                pending_redraw = false;
+            }
+            continue;
+        }
+
+        pending_redraw = true;
     }
 
     guard.deactivate();

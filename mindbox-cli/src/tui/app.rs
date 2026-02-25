@@ -1,3 +1,8 @@
+use std::{
+    collections::{HashMap, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
+};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mindbox_common::{SystemResources, Task, TaskEvent, TaskStatus};
 use serde_json::Value;
@@ -8,20 +13,40 @@ pub const TOOL_RESULT_PREVIEW_TAIL: usize = 10;
 
 #[derive(Debug, Clone)]
 pub enum LogEntry {
-    AssistantText(String),
-    Thinking(String),
+    AssistantText {
+        content: String,
+        streaming: bool,
+    },
+    Thinking {
+        content: String,
+        streaming: bool,
+    },
     ToolUse {
         name: String,
         summary: String,
+        tool_use_id: Option<String>,
+        parent_tool_use_id: Option<String>,
+        depth: usize,
+        streaming: bool,
     },
     ToolResult {
         content: String,
         tool_use_id: Option<String>,
+        depth: usize,
+        streaming: bool,
     },
     SystemMessage(String),
     ResultMessage(String),
     Raw(String),
 }
+
+#[derive(Debug, Clone)]
+struct MessageState {
+    block_keys: Vec<String>,
+    finalized: bool,
+}
+
+const MAX_TRACKED_MESSAGES: usize = 2048;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollState {
@@ -58,6 +83,16 @@ pub struct App {
     pub stream_ended: bool,
     pub expand_all_results: bool,
     pub kernel_max_offset: usize,
+    pub tool_result_positions: HashMap<String, usize>,
+    pub tool_call_parents: HashMap<String, Option<String>>,
+    pub tool_call_depths: HashMap<String, usize>,
+    stream_messages: HashMap<String, MessageState>,
+    stream_block_positions: HashMap<String, usize>,
+    pending_input_json: HashMap<String, String>,
+    message_last_hash: HashMap<String, u64>,
+    message_lru: VecDeque<String>,
+    anon_message_seq_by_parent: HashMap<String, u64>,
+    active_message_by_parent: HashMap<String, String>,
 }
 
 impl App {
@@ -75,6 +110,16 @@ impl App {
             stream_ended: false,
             expand_all_results: false,
             kernel_max_offset: 0,
+            tool_result_positions: HashMap::new(),
+            tool_call_parents: HashMap::new(),
+            tool_call_depths: HashMap::new(),
+            stream_messages: HashMap::new(),
+            stream_block_positions: HashMap::new(),
+            pending_input_json: HashMap::new(),
+            message_last_hash: HashMap::new(),
+            message_lru: VecDeque::new(),
+            anon_message_seq_by_parent: HashMap::new(),
+            active_message_by_parent: HashMap::new(),
         }
     }
 
@@ -225,6 +270,17 @@ impl App {
     }
 
     fn route_log_message(&mut self, message: String) {
+        if let Ok(value) = serde_json::from_str::<Value>(&message) {
+            if self.try_apply_stream_event(&value) {
+                self.touch_kernel_logs();
+                return;
+            }
+            if self.try_reconcile_final_assistant(&value) {
+                self.touch_kernel_logs();
+                return;
+            }
+        }
+
         let parsed = parse_claude_log_entries(&message);
         if !parsed.is_empty() {
             for entry in parsed {
@@ -237,10 +293,19 @@ impl App {
             self.push_kernel(entry);
             return;
         }
+        if is_silent_structured_event(&message) {
+            return;
+        }
 
         let line = sanitize_line_for_display(&message);
         if !line.is_empty() {
             self.push_kernel(LogEntry::Raw(line));
+        }
+    }
+
+    fn touch_kernel_logs(&mut self) {
+        if self.kernel_scroll.auto_scroll {
+            self.kernel_scroll.offset = self.kernel_total_lines();
         }
     }
 
@@ -289,24 +354,86 @@ impl App {
     }
 
     fn push_kernel(&mut self, entry: LogEntry) {
-        if let LogEntry::ToolResult {
-            tool_use_id: Some(new_id),
-            ..
-        } = &entry
-            && let Some(LogEntry::ToolResult {
-                tool_use_id: Some(prev_id),
-                ..
-            }) = self.kernel_logs.last()
-            && prev_id == new_id
-        {
-            let last = self.kernel_logs.len() - 1;
-            self.kernel_logs[last] = entry;
-        } else {
-            self.kernel_logs.push(entry);
+        match entry {
+            LogEntry::ToolUse {
+                name,
+                summary,
+                tool_use_id,
+                parent_tool_use_id,
+                depth,
+                streaming,
+            } => {
+                let resolved_depth = if let Some(id) = tool_use_id.as_ref() {
+                    let resolved = resolve_tool_depth(
+                        id,
+                        parent_tool_use_id.as_deref(),
+                        &self.tool_call_depths,
+                    );
+                    self.tool_call_parents
+                        .insert(id.clone(), parent_tool_use_id.clone());
+                    self.tool_call_depths.insert(id.clone(), resolved);
+                    resolved
+                } else {
+                    depth
+                };
+                self.kernel_logs.push(LogEntry::ToolUse {
+                    name,
+                    summary,
+                    tool_use_id,
+                    parent_tool_use_id,
+                    depth: resolved_depth,
+                    streaming,
+                });
+            }
+            LogEntry::ToolResult {
+                content,
+                tool_use_id: Some(tool_use_id),
+                depth,
+                streaming,
+            } => {
+                let resolved_depth = self
+                    .tool_call_depths
+                    .get(&tool_use_id)
+                    .copied()
+                    .unwrap_or(depth);
+                if let Some(index) = self.tool_result_positions.get(&tool_use_id).copied()
+                    && let Some(LogEntry::ToolResult {
+                        content: existing,
+                        depth: existing_depth,
+                        ..
+                    }) = self.kernel_logs.get_mut(index)
+                {
+                    *existing = merge_tool_result_content(existing, &content);
+                    *existing_depth = resolved_depth;
+                } else {
+                    let index = self.kernel_logs.len();
+                    self.kernel_logs.push(LogEntry::ToolResult {
+                        content,
+                        tool_use_id: Some(tool_use_id.clone()),
+                        depth: resolved_depth,
+                        streaming,
+                    });
+                    self.tool_result_positions.insert(tool_use_id, index);
+                }
+            }
+            LogEntry::ToolResult {
+                content,
+                tool_use_id: None,
+                depth,
+                streaming,
+            } => {
+                self.kernel_logs.push(LogEntry::ToolResult {
+                    content,
+                    tool_use_id: None,
+                    depth,
+                    streaming,
+                });
+            }
+            other => {
+                self.kernel_logs.push(other);
+            }
         }
-        if self.kernel_scroll.auto_scroll {
-            self.kernel_scroll.offset = self.kernel_total_lines();
-        }
+        self.touch_kernel_logs();
     }
 
     pub fn kernel_total_lines(&self) -> usize {
@@ -321,10 +448,10 @@ impl App {
                 }
             }
             match entry {
-                LogEntry::AssistantText(text) => total += text.lines().count().max(1),
-                LogEntry::Thinking(text) => {
+                LogEntry::AssistantText { content, .. } => total += content.lines().count().max(1),
+                LogEntry::Thinking { content, .. } => {
                     total += 1;
-                    total += text.lines().count().max(1);
+                    total += content.lines().count().max(1);
                 }
                 LogEntry::ToolUse { summary, .. } => {
                     total += 1;
@@ -347,6 +474,806 @@ impl App {
         }
         total
     }
+
+    fn try_apply_stream_event(&mut self, value: &Value) -> bool {
+        let event_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !event_type.eq_ignore_ascii_case("stream_event") {
+            return false;
+        }
+
+        let Some(event) = value.get("event") else {
+            return false;
+        };
+        let stream_event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if stream_event_type.is_empty() {
+            return false;
+        }
+
+        let scope_key = build_parent_scope_key(
+            value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .or_else(|| event.get("session_id").and_then(Value::as_str)),
+            value
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .or_else(|| event.get("parent_tool_use_id").and_then(Value::as_str)),
+        );
+
+        match stream_event_type.as_str() {
+            "message_start" => {
+                if let Some(message_key) = self.resolve_message_key(&scope_key, event, true) {
+                    self.active_message_by_parent
+                        .insert(scope_key.clone(), message_key.clone());
+                    let state = self
+                        .stream_messages
+                        .entry(message_key.clone())
+                        .or_insert_with(|| MessageState {
+                            block_keys: Vec::new(),
+                            finalized: false,
+                        });
+                    state.finalized = false;
+                    self.mark_message_seen(&message_key);
+                }
+            }
+            "content_block_start" => {
+                let Some(message_key) = self.resolve_message_key(&scope_key, event, true) else {
+                    return true;
+                };
+                let index = event
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
+                let block = event
+                    .get("content_block")
+                    .or_else(|| event.get("block"))
+                    .unwrap_or(&Value::Null);
+                let block_type = block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let parent_tool_use_id = value
+                    .get("parent_tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+
+                let entry = match block_type.as_str() {
+                    "text" => LogEntry::AssistantText {
+                        content: extract_textish(Some(block)).unwrap_or_default(),
+                        streaming: true,
+                    },
+                    "thinking" => LogEntry::Thinking {
+                        content: extract_thinking_text(block).unwrap_or_default(),
+                        streaming: true,
+                    },
+                    "tool_use" => {
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let summary = extract_tool_summary(&name, block.get("input"));
+                        LogEntry::ToolUse {
+                            name,
+                            summary,
+                            tool_use_id: block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned),
+                            parent_tool_use_id,
+                            depth: 0,
+                            streaming: true,
+                        }
+                    }
+                    _ => return true,
+                };
+                self.upsert_stream_block_entry(&message_key, index, entry, false);
+                if let Some(state) = self.stream_messages.get_mut(&message_key) {
+                    state.finalized = false;
+                }
+                self.mark_message_seen(&message_key);
+            }
+            "content_block_delta" => {
+                let Some(message_key) = self.resolve_message_key(&scope_key, event, true) else {
+                    return true;
+                };
+                let index = event
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
+                let delta = event.get("delta").unwrap_or(&Value::Null);
+                let delta_type = delta
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+
+                match delta_type.as_str() {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            self.upsert_stream_block_entry(
+                                &message_key,
+                                index,
+                                LogEntry::AssistantText {
+                                    content: text.to_string(),
+                                    streaming: true,
+                                },
+                                true,
+                            );
+                        }
+                    }
+                    "thinking_delta" => {
+                        let text = delta
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .or_else(|| delta.get("text").and_then(Value::as_str));
+                        if let Some(text) = text {
+                            self.upsert_stream_block_entry(
+                                &message_key,
+                                index,
+                                LogEntry::Thinking {
+                                    content: text.to_string(),
+                                    streaming: true,
+                                },
+                                true,
+                            );
+                        }
+                    }
+                    "input_json_delta" => {
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let block_key = build_block_key(&message_key, index);
+                        let pending = self.pending_input_json.entry(block_key).or_default();
+                        pending.push_str(partial);
+                        let summary = summarize_partial_input_for_display(pending);
+                        self.upsert_stream_tool_use_summary(&message_key, index, summary);
+                    }
+                    _ => {}
+                }
+                if let Some(state) = self.stream_messages.get_mut(&message_key) {
+                    state.finalized = false;
+                }
+                self.mark_message_seen(&message_key);
+            }
+            "content_block_stop" => {
+                let Some(message_key) = self.resolve_message_key(&scope_key, event, false) else {
+                    return true;
+                };
+                let index = event
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
+                self.set_streaming_for_block(&message_key, index, false);
+                self.pending_input_json
+                    .remove(&build_block_key(&message_key, index));
+            }
+            "message_delta" => {
+                if let Some(message_key) = self.resolve_message_key(&scope_key, event, false) {
+                    if let Some(state) = self.stream_messages.get_mut(&message_key) {
+                        state.finalized = false;
+                    }
+                    self.mark_message_seen(&message_key);
+                }
+            }
+            "message_stop" => {
+                if let Some(message_key) = self.resolve_message_key(&scope_key, event, false) {
+                    self.finalize_message(&message_key);
+                }
+                self.active_message_by_parent.remove(&scope_key);
+            }
+            _ => {}
+        }
+
+        true
+    }
+
+    fn try_reconcile_final_assistant(&mut self, value: &Value) -> bool {
+        let event_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !event_type.eq_ignore_ascii_case("assistant") {
+            return false;
+        }
+
+        let message_id = value
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("id").and_then(Value::as_str));
+        let Some(message_id) = message_id else {
+            return false;
+        };
+
+        let scope_key = build_parent_scope_key(
+            value.get("session_id").and_then(Value::as_str),
+            value.get("parent_tool_use_id").and_then(Value::as_str),
+        );
+        let message_key = build_message_key(&scope_key, message_id);
+        let blocks = extract_assistant_blocks(value);
+        if blocks.is_empty() {
+            return false;
+        }
+
+        let next_hash = hash_assistant_blocks(&blocks);
+        if self.message_last_hash.get(&message_key) == Some(&next_hash) {
+            return true;
+        }
+
+        self.active_message_by_parent
+            .insert(scope_key, message_key.clone());
+        for block in blocks {
+            match block {
+                AssistantBlock::Text { index, content } => {
+                    self.upsert_stream_block_entry(
+                        &message_key,
+                        index,
+                        LogEntry::AssistantText {
+                            content,
+                            streaming: false,
+                        },
+                        false,
+                    );
+                }
+                AssistantBlock::Thinking { index, content } => {
+                    self.upsert_stream_block_entry(
+                        &message_key,
+                        index,
+                        LogEntry::Thinking {
+                            content,
+                            streaming: false,
+                        },
+                        false,
+                    );
+                }
+                AssistantBlock::ToolUse {
+                    index,
+                    name,
+                    summary,
+                    tool_use_id,
+                    parent_tool_use_id,
+                } => {
+                    self.upsert_stream_block_entry(
+                        &message_key,
+                        index,
+                        LogEntry::ToolUse {
+                            name,
+                            summary,
+                            tool_use_id,
+                            parent_tool_use_id,
+                            depth: 0,
+                            streaming: false,
+                        },
+                        false,
+                    );
+                }
+            }
+        }
+
+        self.finalize_message(&message_key);
+        self.message_last_hash
+            .insert(message_key.clone(), next_hash);
+        self.mark_message_seen(&message_key);
+        true
+    }
+
+    fn resolve_message_key(
+        &mut self,
+        scope_key: &str,
+        event: &Value,
+        create_if_missing: bool,
+    ) -> Option<String> {
+        let from_message = event
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .or_else(|| event.get("message_id").and_then(Value::as_str));
+
+        if let Some(message_id) = from_message {
+            let key = build_message_key(scope_key, message_id);
+            self.active_message_by_parent
+                .insert(scope_key.to_string(), key.clone());
+            return Some(key);
+        }
+
+        if let Some(active) = self.active_message_by_parent.get(scope_key) {
+            return Some(active.clone());
+        }
+
+        if !create_if_missing {
+            return None;
+        }
+
+        let seq = self
+            .anon_message_seq_by_parent
+            .entry(scope_key.to_string())
+            .and_modify(|v| *v = v.saturating_add(1))
+            .or_insert(1);
+        let key = build_message_key(scope_key, &format!("__anon_{seq}"));
+        self.active_message_by_parent
+            .insert(scope_key.to_string(), key.clone());
+        Some(key)
+    }
+
+    fn upsert_stream_block_entry(
+        &mut self,
+        message_key: &str,
+        index: usize,
+        entry: LogEntry,
+        append: bool,
+    ) {
+        let block_key = build_block_key(message_key, index);
+        let existing_position = self.stream_block_positions.get(&block_key).copied();
+
+        if let Some(position) = existing_position {
+            if let Some(existing) = self.kernel_logs.get_mut(position) {
+                merge_log_entry(existing, entry, append);
+            }
+        } else {
+            let position = self.kernel_logs.len();
+            self.push_kernel(entry);
+            self.stream_block_positions
+                .insert(block_key.clone(), position);
+        }
+
+        let state = self
+            .stream_messages
+            .entry(message_key.to_string())
+            .or_insert_with(|| MessageState {
+                block_keys: Vec::new(),
+                finalized: false,
+            });
+        if !state.block_keys.iter().any(|key| key == &block_key) {
+            state.block_keys.push(block_key);
+            state.block_keys.sort();
+        }
+    }
+
+    fn upsert_stream_tool_use_summary(&mut self, message_key: &str, index: usize, summary: String) {
+        let block_key = build_block_key(message_key, index);
+        if let Some(position) = self.stream_block_positions.get(&block_key).copied()
+            && let Some(LogEntry::ToolUse {
+                summary: existing,
+                streaming,
+                ..
+            }) = self.kernel_logs.get_mut(position)
+        {
+            *existing = summary;
+            *streaming = true;
+            return;
+        }
+
+        self.upsert_stream_block_entry(
+            message_key,
+            index,
+            LogEntry::ToolUse {
+                name: "unknown".to_string(),
+                summary,
+                tool_use_id: None,
+                parent_tool_use_id: None,
+                depth: 0,
+                streaming: true,
+            },
+            false,
+        );
+    }
+
+    fn set_streaming_for_block(&mut self, message_key: &str, index: usize, streaming: bool) {
+        let block_key = build_block_key(message_key, index);
+        if let Some(position) = self.stream_block_positions.get(&block_key).copied()
+            && let Some(entry) = self.kernel_logs.get_mut(position)
+        {
+            match entry {
+                LogEntry::AssistantText {
+                    streaming: current, ..
+                }
+                | LogEntry::Thinking {
+                    streaming: current, ..
+                }
+                | LogEntry::ToolUse {
+                    streaming: current, ..
+                }
+                | LogEntry::ToolResult {
+                    streaming: current, ..
+                } => *current = streaming,
+                LogEntry::SystemMessage(_) | LogEntry::ResultMessage(_) | LogEntry::Raw(_) => {}
+            }
+        }
+    }
+
+    fn finalize_message(&mut self, message_key: &str) {
+        let mut snapshot = None;
+        if let Some(state) = self.stream_messages.get_mut(message_key) {
+            state.finalized = true;
+            for block_key in &state.block_keys {
+                if let Some(position) = self.stream_block_positions.get(block_key).copied()
+                    && let Some(entry) = self.kernel_logs.get_mut(position)
+                {
+                    match entry {
+                        LogEntry::AssistantText { streaming, .. }
+                        | LogEntry::Thinking { streaming, .. }
+                        | LogEntry::ToolUse { streaming, .. }
+                        | LogEntry::ToolResult { streaming, .. } => *streaming = false,
+                        LogEntry::SystemMessage(_)
+                        | LogEntry::ResultMessage(_)
+                        | LogEntry::Raw(_) => {}
+                    }
+                }
+                self.pending_input_json.remove(block_key);
+            }
+            snapshot = Some(state.block_keys.clone());
+        }
+        if let Some(blocks) = snapshot {
+            self.message_last_hash.insert(
+                message_key.to_string(),
+                hash_message_snapshot(&blocks, &self.stream_block_positions, &self.kernel_logs),
+            );
+        }
+        self.mark_message_seen(message_key);
+    }
+
+    fn mark_message_seen(&mut self, message_key: &str) {
+        self.message_lru.retain(|item| item != message_key);
+        self.message_lru.push_back(message_key.to_string());
+
+        while self.message_lru.len() > MAX_TRACKED_MESSAGES {
+            let Some(evicted) = self.message_lru.pop_front() else {
+                break;
+            };
+            let Some(state) = self.stream_messages.remove(&evicted) else {
+                continue;
+            };
+            self.message_last_hash.remove(&evicted);
+            for key in state.block_keys {
+                self.stream_block_positions.remove(&key);
+                self.pending_input_json.remove(&key);
+            }
+            self.active_message_by_parent
+                .retain(|_, active| active != &evicted);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum AssistantBlock {
+    Text {
+        index: usize,
+        content: String,
+    },
+    Thinking {
+        index: usize,
+        content: String,
+    },
+    ToolUse {
+        index: usize,
+        name: String,
+        summary: String,
+        tool_use_id: Option<String>,
+        parent_tool_use_id: Option<String>,
+    },
+}
+
+fn build_parent_scope_key(session_id: Option<&str>, parent_tool_use_id: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        session_id.unwrap_or_default(),
+        parent_tool_use_id.unwrap_or_default()
+    )
+}
+
+fn build_message_key(scope_key: &str, message_id: &str) -> String {
+    format!("{scope_key}::{message_id}")
+}
+
+fn build_block_key(message_key: &str, index: usize) -> String {
+    format!("{message_key}#{index}")
+}
+
+fn merge_log_entry(existing: &mut LogEntry, incoming: LogEntry, append: bool) {
+    match (existing, incoming) {
+        (
+            LogEntry::AssistantText {
+                content: left,
+                streaming: left_streaming,
+            },
+            LogEntry::AssistantText {
+                content: right,
+                streaming,
+            },
+        ) => {
+            if append {
+                left.push_str(&right);
+            } else {
+                *left = right;
+            }
+            *left_streaming = streaming;
+        }
+        (
+            LogEntry::Thinking {
+                content: left,
+                streaming: left_streaming,
+            },
+            LogEntry::Thinking {
+                content: right,
+                streaming,
+            },
+        ) => {
+            if append {
+                left.push_str(&right);
+            } else {
+                *left = right;
+            }
+            *left_streaming = streaming;
+        }
+        (
+            LogEntry::ToolUse {
+                name,
+                summary,
+                tool_use_id,
+                parent_tool_use_id,
+                streaming: left_streaming,
+                ..
+            },
+            LogEntry::ToolUse {
+                name: right_name,
+                summary: right_summary,
+                tool_use_id: right_tool_use_id,
+                parent_tool_use_id: right_parent_tool_use_id,
+                streaming,
+                ..
+            },
+        ) => {
+            if !right_name.is_empty() && name == "unknown" {
+                *name = right_name;
+            }
+            if !right_summary.is_empty() {
+                *summary = right_summary;
+            }
+            if right_tool_use_id.is_some() {
+                *tool_use_id = right_tool_use_id;
+            }
+            if right_parent_tool_use_id.is_some() {
+                *parent_tool_use_id = right_parent_tool_use_id;
+            }
+            *left_streaming = streaming;
+        }
+        (
+            LogEntry::ToolResult {
+                content: left,
+                streaming: left_streaming,
+                ..
+            },
+            LogEntry::ToolResult {
+                content: right,
+                streaming,
+                ..
+            },
+        ) => {
+            if append {
+                *left = merge_tool_result_content(left, &right);
+            } else {
+                *left = right;
+            }
+            *left_streaming = streaming;
+        }
+        (slot, incoming) => {
+            *slot = incoming;
+        }
+    }
+}
+
+fn summarize_partial_input_for_display(partial: &str) -> String {
+    let trimmed = partial.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let summary = extract_tool_summary("unknown", Some(&value));
+        if !summary.is_empty() {
+            return summary;
+        }
+    }
+
+    truncate_text(&sanitize_line_for_display(trimmed), 120)
+}
+
+fn extract_assistant_blocks(value: &Value) -> Vec<AssistantBlock> {
+    let mut out = Vec::new();
+    let parent_tool_use_id = value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        for (index, block) in content.iter().enumerate() {
+            let block_type = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            match block_type.as_str() {
+                "text" => {
+                    if let Some(text) =
+                        extract_textish(Some(block)).and_then(|v| normalize_multiline_text(&v))
+                    {
+                        out.push(AssistantBlock::Text {
+                            index,
+                            content: text,
+                        });
+                    }
+                }
+                "thinking" => {
+                    if let Some(text) =
+                        extract_thinking_text(block).and_then(|v| normalize_multiline_text(&v))
+                    {
+                        out.push(AssistantBlock::Thinking {
+                            index,
+                            content: text,
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    out.push(AssistantBlock::ToolUse {
+                        index,
+                        summary: extract_tool_summary(&name, block.get("input")),
+                        name,
+                        tool_use_id: block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        parent_tool_use_id: parent_tool_use_id.clone(),
+                    });
+                }
+                _ => {
+                    if let Some(text) =
+                        extract_textish(Some(block)).and_then(|v| normalize_multiline_text(&v))
+                    {
+                        out.push(AssistantBlock::Text {
+                            index,
+                            content: text,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty()
+        && let Some(text) = extract_textish(
+            value
+                .get("text")
+                .or_else(|| value.pointer("/delta/text"))
+                .or_else(|| value.pointer("/message/content"))
+                .or_else(|| value.get("content"))
+                .or_else(|| value.get("message")),
+        )
+        .and_then(|v| normalize_multiline_text(&v))
+    {
+        out.push(AssistantBlock::Text {
+            index: 0,
+            content: text,
+        });
+    }
+
+    out
+}
+
+fn hash_assistant_blocks(blocks: &[AssistantBlock]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for block in blocks {
+        match block {
+            AssistantBlock::Text { index, content } => {
+                index.hash(&mut hasher);
+                "text".hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+            AssistantBlock::Thinking { index, content } => {
+                index.hash(&mut hasher);
+                "thinking".hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+            AssistantBlock::ToolUse {
+                index,
+                name,
+                summary,
+                tool_use_id,
+                parent_tool_use_id,
+            } => {
+                index.hash(&mut hasher);
+                "tool_use".hash(&mut hasher);
+                name.hash(&mut hasher);
+                summary.hash(&mut hasher);
+                tool_use_id.hash(&mut hasher);
+                parent_tool_use_id.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_message_snapshot(
+    block_keys: &[String],
+    block_positions: &HashMap<String, usize>,
+    logs: &[LogEntry],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let mut ordered_keys = block_keys.to_vec();
+    ordered_keys.sort();
+
+    for key in ordered_keys {
+        key.hash(&mut hasher);
+        if let Some(position) = block_positions.get(&key).copied()
+            && let Some(entry) = logs.get(position)
+        {
+            match entry {
+                LogEntry::AssistantText { content, .. } => {
+                    "assistant".hash(&mut hasher);
+                    content.hash(&mut hasher);
+                }
+                LogEntry::Thinking { content, .. } => {
+                    "thinking".hash(&mut hasher);
+                    content.hash(&mut hasher);
+                }
+                LogEntry::ToolUse {
+                    name,
+                    summary,
+                    tool_use_id,
+                    parent_tool_use_id,
+                    depth,
+                    ..
+                } => {
+                    "tool_use".hash(&mut hasher);
+                    name.hash(&mut hasher);
+                    summary.hash(&mut hasher);
+                    tool_use_id.hash(&mut hasher);
+                    parent_tool_use_id.hash(&mut hasher);
+                    depth.hash(&mut hasher);
+                }
+                LogEntry::ToolResult {
+                    content,
+                    tool_use_id,
+                    depth,
+                    ..
+                } => {
+                    "tool_result".hash(&mut hasher);
+                    content.hash(&mut hasher);
+                    tool_use_id.hash(&mut hasher);
+                    depth.hash(&mut hasher);
+                }
+                LogEntry::SystemMessage(text) => {
+                    "system".hash(&mut hasher);
+                    text.hash(&mut hasher);
+                }
+                LogEntry::ResultMessage(text) => {
+                    "result".hash(&mut hasher);
+                    text.hash(&mut hasher);
+                }
+                LogEntry::Raw(text) => {
+                    "raw".hash(&mut hasher);
+                    text.hash(&mut hasher);
+                }
+            }
+        }
+    }
+
+    hasher.finish()
 }
 
 fn extract_tool_summary(name: &str, input: Option<&Value>) -> String {
@@ -443,7 +1370,20 @@ fn parse_claude_log_entries(line: &str) -> Vec<LogEntry> {
                 .or_else(|| value.get("tool_input"))
                 .or_else(|| value.get("arguments"));
             let summary = extract_tool_summary(&name, input_value);
-            vec![LogEntry::ToolUse { name, summary }]
+            vec![LogEntry::ToolUse {
+                name,
+                summary,
+                tool_use_id: value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                parent_tool_use_id: value
+                    .get("parent_tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                depth: 0,
+                streaming: false,
+            }]
         }
         "tool_result" => {
             let content = value
@@ -460,6 +1400,8 @@ fn parse_claude_log_entries(line: &str) -> Vec<LogEntry> {
                 .map(|content| LogEntry::ToolResult {
                     content,
                     tool_use_id,
+                    depth: 0,
+                    streaming: false,
                 })
                 .into_iter()
                 .collect()
@@ -490,6 +1432,10 @@ fn parse_claude_log_entries(line: &str) -> Vec<LogEntry> {
 
 fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
     let mut out = Vec::new();
+    let parent_tool_use_id = value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
 
     if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
         for block in content {
@@ -504,16 +1450,23 @@ fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
                     if let Some(text) =
                         extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
                     {
-                        out.push(LogEntry::AssistantText(text));
+                        out.push(LogEntry::AssistantText {
+                            content: text,
+                            streaming: false,
+                        });
                     }
                 }
                 "thinking" => {
                     if let Some(text) =
                         extract_thinking_text(block).and_then(|t| normalize_multiline_text(&t))
                     {
-                        out.push(LogEntry::Thinking(text));
+                        out.push(LogEntry::Thinking {
+                            content: text,
+                            streaming: false,
+                        });
                     }
                 }
+                "redacted_thinking" => {}
                 "tool_use" => {
                     let name = block
                         .get("name")
@@ -521,13 +1474,26 @@ fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
                         .unwrap_or("unknown")
                         .to_string();
                     let summary = extract_tool_summary(&name, block.get("input"));
-                    out.push(LogEntry::ToolUse { name, summary });
+                    out.push(LogEntry::ToolUse {
+                        name,
+                        summary,
+                        tool_use_id: block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        parent_tool_use_id: parent_tool_use_id.clone(),
+                        depth: 0,
+                        streaming: false,
+                    });
                 }
                 _ => {
                     if let Some(text) =
                         extract_textish(Some(block)).and_then(|t| normalize_multiline_text(&t))
                     {
-                        out.push(LogEntry::AssistantText(text));
+                        out.push(LogEntry::AssistantText {
+                            content: text,
+                            streaming: false,
+                        });
                     }
                 }
             }
@@ -545,7 +1511,10 @@ fn parse_assistant_message_entries(value: &Value) -> Vec<LogEntry> {
         )
         .and_then(|t| normalize_multiline_text(&t))
     {
-        out.push(LogEntry::AssistantText(text));
+        out.push(LogEntry::AssistantText {
+            content: text,
+            streaming: false,
+        });
     }
 
     out
@@ -580,6 +1549,8 @@ fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
                                 .get("tool_use_id")
                                 .and_then(Value::as_str)
                                 .map(ToOwned::to_owned),
+                            depth: 0,
+                            streaming: false,
                         });
                     }
                 }
@@ -608,6 +1579,8 @@ fn parse_user_message_entries(value: &Value) -> Vec<LogEntry> {
         out.push(LogEntry::ToolResult {
             content: text,
             tool_use_id: extract_user_tool_use_id(value),
+            depth: 0,
+            streaming: false,
         });
     }
 
@@ -682,6 +1655,7 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
     let object = value.as_object()?;
 
     let event_type = object.get("type").and_then(Value::as_str).unwrap_or("json");
+    let event_type_lower = event_type.to_ascii_lowercase();
     let subtype = object
         .get("subtype")
         .and_then(Value::as_str)
@@ -707,6 +1681,12 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
     )
     .map(|text| truncate_text(&sanitize_line_for_display(&text), 180));
 
+    if detail.as_deref().unwrap_or("").is_empty()
+        && matches!(event_type_lower.as_str(), "assistant" | "system")
+    {
+        return None;
+    }
+
     if let Some(text) = detail
         && !text.is_empty()
     {
@@ -715,6 +1695,81 @@ fn parse_jsonl_fallback_entry(line: &str) -> Option<LogEntry> {
     }
 
     Some(LogEntry::SystemMessage(summary))
+}
+
+fn is_silent_structured_event(line: &str) -> bool {
+    let value = match serde_json::from_str::<Value>(line) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    let event_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !event_type.eq_ignore_ascii_case("assistant") && !event_type.eq_ignore_ascii_case("system") {
+        return false;
+    }
+
+    extract_textish(
+        object
+            .get("message")
+            .or_else(|| object.get("result"))
+            .or_else(|| object.get("error"))
+            .or_else(|| object.get("status"))
+            .or_else(|| object.get("detail")),
+    )
+    .and_then(|text| normalize_multiline_text(&text))
+    .is_none()
+}
+
+fn merge_tool_result_content(previous: &str, new: &str) -> String {
+    if new.starts_with(previous) {
+        return new.to_string();
+    }
+    if previous.starts_with(new) {
+        return previous.to_string();
+    }
+    if previous.is_empty() {
+        return new.to_string();
+    }
+    if new.is_empty() {
+        return previous.to_string();
+    }
+    if previous.ends_with('\n') {
+        format!("{previous}{new}")
+    } else {
+        format!("{previous}\n{new}")
+    }
+}
+
+fn resolve_tool_depth(
+    tool_use_id: &str,
+    parent_tool_use_id: Option<&str>,
+    known_depths: &HashMap<String, usize>,
+) -> usize {
+    let mut depth = 0usize;
+    let mut parent = parent_tool_use_id;
+    let mut guard = 0usize;
+    while let Some(parent_id) = parent {
+        if parent_id == tool_use_id {
+            break;
+        }
+        depth = depth.saturating_add(1);
+        if let Some(parent_depth) = known_depths.get(parent_id) {
+            depth = depth.saturating_add(*parent_depth);
+            break;
+        }
+        parent = None;
+        guard = guard.saturating_add(1);
+        if guard > 32 {
+            break;
+        }
+    }
+    depth
 }
 
 fn user_fallback_entry(value: &Value, subtype: &str) -> LogEntry {
@@ -937,7 +1992,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         match &entries[0] {
-            LogEntry::ToolUse { name, summary } => {
+            LogEntry::ToolUse { name, summary, .. } => {
                 assert_eq!(name, "Bash");
                 assert_eq!(summary, "echo hello");
             }
@@ -956,6 +2011,7 @@ mod tests {
             LogEntry::ToolResult {
                 content,
                 tool_use_id,
+                ..
             } => {
                 assert_eq!(content, "done");
                 assert!(tool_use_id.is_none());
@@ -971,9 +2027,26 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         match &entries[0] {
-            LogEntry::Thinking(content) => assert_eq!(content, "plan first"),
+            LogEntry::Thinking { content, .. } => assert_eq!(content, "plan first"),
             other => panic!("unexpected entry: {other:?}"),
         };
+    }
+
+    #[test]
+    fn assistant_redacted_thinking_is_suppressed() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"assistant","message":{"content":[{"type":"redacted_thinking","data":"opaque"}]}}"#
+                .to_string(),
+        );
+        assert!(app.kernel_logs.is_empty());
+    }
+
+    #[test]
+    fn system_init_without_detail_is_suppressed() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(r#"{"type":"system","subtype":"init","session_id":"s1"}"#.to_string());
+        assert!(app.kernel_logs.is_empty());
     }
 
     #[test]
@@ -1028,10 +2101,253 @@ mod tests {
             LogEntry::ToolResult {
                 content,
                 tool_use_id,
+                ..
             } => {
                 assert_eq!(content, "line 1\nline 2");
                 assert_eq!(tool_use_id.as_deref(), Some("tool-1"));
             }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_with_same_tool_use_id_updates_even_if_not_last() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"line 1"}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"other"}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"line 1\nline 2"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 2);
+        match &app.kernel_logs[0] {
+            LogEntry::ToolResult {
+                content,
+                tool_use_id,
+                ..
+            } => {
+                assert_eq!(content, "line 1\nline 2");
+                assert_eq!(tool_use_id.as_deref(), Some("tool-1"));
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_non_prefix_chunks_append_for_same_tool_use_id() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"chunk 1"}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"chunk 2"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::ToolResult { content, .. } => assert_eq!(content, "chunk 1\nchunk 2"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_without_tool_use_id_keeps_append_behavior() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"line 1"}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"line 2"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 2);
+    }
+
+    #[test]
+    fn nested_tool_use_records_depth_and_result_depth() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","name":"Task","id":"tool-parent","input":{"description":"parent"}}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"assistant","parent_tool_use_id":"tool-parent","message":{"content":[{"type":"tool_use","name":"Bash","id":"tool-child","input":{"command":"echo hi"}}]}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-child","content":"hi"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 3);
+        match &app.kernel_logs[0] {
+            LogEntry::ToolUse { depth, .. } => assert_eq!(*depth, 0),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+        match &app.kernel_logs[1] {
+            LogEntry::ToolUse {
+                depth,
+                parent_tool_use_id,
+                ..
+            } => {
+                assert_eq!(*depth, 1);
+                assert_eq!(parent_tool_use_id.as_deref(), Some("tool-parent"));
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+        match &app.kernel_logs[2] {
+            LogEntry::ToolResult { depth, .. } => assert_eq!(*depth, 1),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_event_text_delta_updates_single_entry() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::AssistantText { content, streaming } => {
+                assert_eq!(content, "hello world");
+                assert!(*streaming);
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#.to_string(),
+        );
+
+        match &app.kernel_logs[0] {
+            LogEntry::AssistantText { streaming, .. } => assert!(!*streaming),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_event_input_json_delta_updates_tool_summary() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"Bash","input":{}}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"echo"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":" hi\"}"}}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::ToolUse { name, summary, .. } => {
+                assert_eq!(name, "Bash");
+                assert!(summary.contains("echo hi"), "summary={summary}");
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn final_assistant_message_reconciles_without_duplication() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m3"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"hello"}]}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 1);
+        match &app.kernel_logs[0] {
+            LogEntry::AssistantText { content, streaming } => {
+                assert_eq!(content, "hello");
+                assert!(!*streaming);
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+
+        app.handle_raw_log(
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"hello"}]}}"#
+                .to_string(),
+        );
+        assert_eq!(app.kernel_logs.len(), 1);
+    }
+
+    #[test]
+    fn message_scope_uses_parent_tool_use_id_to_avoid_collision() {
+        let mut app = App::new("task-1".to_string());
+        app.handle_raw_log(
+            r#"{"type":"stream_event","parent_tool_use_id":"tool-a","event":{"type":"message_start","message":{"id":"m1"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","parent_tool_use_id":"tool-a","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"from-a"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","parent_tool_use_id":"tool-b","event":{"type":"message_start","message":{"id":"m1"}}}"#
+                .to_string(),
+        );
+        app.handle_raw_log(
+            r#"{"type":"stream_event","parent_tool_use_id":"tool-b","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"from-b"}}}"#
+                .to_string(),
+        );
+
+        assert_eq!(app.kernel_logs.len(), 2);
+        match &app.kernel_logs[0] {
+            LogEntry::AssistantText { content, .. } => assert_eq!(content, "from-a"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+        match &app.kernel_logs[1] {
+            LogEntry::AssistantText { content, .. } => assert_eq!(content, "from-b"),
             other => panic!("unexpected entry: {other:?}"),
         }
     }

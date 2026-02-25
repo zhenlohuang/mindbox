@@ -29,16 +29,16 @@ to make hardware-aware decisions (model size, batch size, device selection).
 Run the detection script — it has zero external dependencies (stdlib only):
 
 ```bash
-python /home/mindbox/.claude/skills/gpu-discovery-skill/scripts/detect_gpu.py
+python scripts/detect_gpu.py
 ```
 
-The script writes `workspace/gpu_info.json` and prints a human-readable summary to stdout.
+The script writes `gpu_info.json` and prints a human-readable summary to stdout.
 
 ---
 
 ## Step 2: Read the Report
 
-Read `workspace/gpu_info.json`. The schema:
+Read `gpu_info.json`. The schema:
 
 **GPU available:**
 ```json

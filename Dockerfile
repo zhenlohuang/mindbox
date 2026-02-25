@@ -16,6 +16,8 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    build-essential \
+    cmake \
     curl \
     git \
     python3 \
@@ -25,10 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     unzip \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --break-system-packages \
     uv \
+    PyYAML \
     tensorboard
 RUN npm install -g @anthropic-ai/claude-code
 

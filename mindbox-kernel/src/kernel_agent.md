@@ -64,15 +64,16 @@ All subsequent scripts must run inside this virtual environment. Re-activate wit
 ## Script Execution Rules
 
 1. Place all generated scripts in `workspace/scripts/`.
-2. ALWAYS redirect stdout and stderr to a per-step log file under `logs/steps/`.
+2. ALWAYS run Python scripts with `python3` (not `python`).
+3. ALWAYS redirect stdout and stderr to a per-step log file under `logs/steps/`.
    Log naming convention: `step<NN>_<step-name>.log` (zero-padded two-digit step number).
    ```bash
-   mkdir -p logs/steps && cd workspace && python scripts/train.py > ../logs/steps/04_train.log 2>&1
+   mkdir -p logs/steps && cd workspace && python3 scripts/train.py > ../logs/steps/04_train.log 2>&1
    ```
-3. NEVER let script output flow directly to the terminal — it wastes your context window.
-4. After the script exits, check `$?`.
-5. On FAILURE (non-zero exit): read the last 50 lines of the log to diagnose.
-6. On SUCCESS: read the last 20 lines to extract final metrics/results.
+4. NEVER let script output flow directly to the terminal — it wastes your context window.
+5. After the script exits, check `$?`.
+6. On FAILURE (non-zero exit): read the last 50 lines of the log to diagnose.
+7. On SUCCESS: read the last 20 lines to extract final metrics/results.
 
 ## Error Recovery
 

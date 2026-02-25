@@ -294,43 +294,73 @@ fn kernel_lines(entries: &[LogEntry], expand_all_results: bool) -> Vec<Line<'sta
         }
 
         match entry {
-            LogEntry::AssistantText(text) => {
-                push_multiline(&mut out, text, Style::default().fg(Color::White), "");
+            LogEntry::AssistantText { content, streaming } => {
+                push_multiline(&mut out, content, Style::default().fg(Color::White), "");
+                if *streaming {
+                    out.push(Line::from(vec![Span::styled(
+                        "…",
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
             }
-            LogEntry::Thinking(text) => {
+            LogEntry::Thinking { content, streaming } => {
                 out.push(Line::from(vec![Span::styled(
                     "Thinking:",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                push_multiline(&mut out, text, Style::default().fg(Color::DarkGray), "  ");
+                push_multiline(
+                    &mut out,
+                    content,
+                    Style::default().fg(Color::DarkGray),
+                    "  ",
+                );
+                if *streaming {
+                    out.push(Line::from(vec![Span::styled(
+                        "  …",
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
             }
-            LogEntry::ToolUse { name, summary, .. } => {
+            LogEntry::ToolUse {
+                name,
+                summary,
+                depth,
+                streaming,
+                ..
+            } => {
+                let base_indent = "  ".repeat(*depth);
+                let title = if *streaming {
+                    format!("{base_indent}Tool Use: {name} …")
+                } else {
+                    format!("{base_indent}Tool Use: {name}")
+                };
                 out.push(Line::from(vec![Span::styled(
-                    format!("Tool Use: {name}"),
+                    title,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )]));
                 if !summary.is_empty() {
+                    let detail_indent = "  ".repeat(depth.saturating_add(1));
                     out.push(Line::from(vec![Span::styled(
-                        format!("  {summary}"),
+                        format!("{detail_indent}{summary}"),
                         dim_style,
                     )]));
                 }
             }
-            LogEntry::ToolResult { content, .. } => {
+            LogEntry::ToolResult {
+                content,
+                depth,
+                streaming,
+                ..
+            } => {
                 let lower = content.trim_start().to_ascii_lowercase();
                 let is_error = lower.starts_with("error") || lower.contains("error:");
-                let attached_to_tool_use =
-                    i > 0 && matches!(entries[i - 1], LogEntry::ToolUse { .. });
-                let first_prefix = if attached_to_tool_use {
-                    "  ⎿ "
-                } else {
-                    "⎿ "
-                };
-                let body_prefix = if attached_to_tool_use { "    " } else { "  " };
+                let indent = "  ".repeat(depth.saturating_add(1));
+                let first_prefix = format!("{indent}⎿ ");
+                let body_prefix = format!("{indent}  ");
                 let style = if is_error {
                     Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
                 } else {
@@ -341,10 +371,20 @@ fn kernel_lines(entries: &[LogEntry], expand_all_results: bool) -> Vec<Line<'sta
 
                 let visible_lines = tool_result_visible_lines(content, expand_all_results);
                 for (idx, line) in visible_lines.iter().enumerate() {
-                    let prefix = if idx == 0 { first_prefix } else { body_prefix };
+                    let prefix = if idx == 0 {
+                        first_prefix.as_str()
+                    } else {
+                        body_prefix.as_str()
+                    };
                     out.push(Line::from(vec![Span::styled(
                         format!("{prefix}{line}"),
                         style,
+                    )]));
+                }
+                if *streaming {
+                    out.push(Line::from(vec![Span::styled(
+                        format!("{body_prefix}…"),
+                        Style::default().fg(Color::DarkGray),
                     )]));
                 }
             }

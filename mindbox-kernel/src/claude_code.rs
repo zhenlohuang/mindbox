@@ -53,6 +53,7 @@ impl Kernel for ClaudeCodeKernel {
         let mut cmd = Command::new("claude");
         cmd.arg("--print")
             .arg("--verbose")
+            .arg("--include-partial-messages")
             .arg("--output-format")
             .arg("stream-json");
 
