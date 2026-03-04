@@ -4,15 +4,15 @@ use anyhow::Result;
 use tokio::fs;
 
 pub fn build_agent_md() -> &'static str {
-    include_str!("kernel_agent.md")
+    include_str!("kernel_agents.md")
 }
 
 pub async fn ensure_agent_files(task_dir: &Path, agent_md: &str) -> Result<()> {
-    fs::write(task_dir.join("AGENT.md"), agent_md).await?;
+    fs::write(task_dir.join("AGENTS.md"), agent_md).await?;
 
     let claude_md_path = task_dir.join("CLAUDE.md");
     if fs::symlink_metadata(&claude_md_path).await.is_err() {
-        fs::symlink("AGENT.md", &claude_md_path).await?;
+        fs::symlink("AGENTS.md", &claude_md_path).await?;
     }
 
     Ok(())
@@ -44,9 +44,9 @@ mod tests {
             .await
             .expect("write agent files");
 
-        let agent = fs::read_to_string(task_dir.join("AGENT.md"))
+        let agent = fs::read_to_string(task_dir.join("AGENTS.md"))
             .await
-            .expect("read AGENT.md");
+            .expect("read AGENTS.md");
         assert_eq!(agent, content);
 
         let claude = fs::read_to_string(task_dir.join("CLAUDE.md"))
@@ -62,9 +62,9 @@ mod tests {
         fs::remove_file(task_dir.join("CLAUDE.md"))
             .await
             .expect("remove CLAUDE.md");
-        fs::remove_file(task_dir.join("AGENT.md"))
+        fs::remove_file(task_dir.join("AGENTS.md"))
             .await
-            .expect("remove AGENT.md");
+            .expect("remove AGENTS.md");
         fs::remove_dir_all(&task_dir)
             .await
             .expect("remove temp dir");
