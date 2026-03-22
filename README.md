@@ -1,5 +1,7 @@
 # Mindbox
 
+> **Warning:** This project is in **Alpha** stage. Do not use it in production environments.
+
 Mindbox is an agentic platform for automated model fine-tuning workflows.
 
 It helps you:
